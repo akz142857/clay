@@ -2106,7 +2106,7 @@ def verify_source_lock(lock: Mapping[str, Any], *, root: str | Path) -> None:
 # to execute at all once a locked source has changed, so a result produced by
 # edited code cannot come into existence in the first place.
 PERMANENCE_STACK_SOURCE_LOCK = Path(
-    "experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V2.json"
+    "experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V3.json"
 )
 
 

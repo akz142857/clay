@@ -81,10 +81,24 @@ run_candidate_lifecycle(factory, *, train_sensor_streams,
 | **I1** ✅ | M1 `SensorOnlyFrontEnd` | 从 sensed patch 序列重建 `m_t`；对已观察为自由的格 `m→0`、未观察格保持先验、界外恒 1；**与真值 static 的一致性只作诊断断言，绝不作为输入**。**已完成**：`cal/model/sensor_only_static_map.py`，实测恢复 24/31 场内静态格、零假阳性 |
 | **I2** ✅ | M2 存在性通道 | 单实体、无关联歧义下，逐步 `e_t` 与 `branch_log_weight` 与 §5.3 公式逐项吻合。**已完成**：`cal/model/permanence_track.py`。**关键点是不双重计数**——`PackedKinematicFilter` 报告的 `observation_evidence` 就是 `L_no`，其自带的 `branch_log_weight` 是无存在性版本；轨道只叠加存在性感知的证据 + 剪枝损失 |
 | **I3** ✅ | M3 branch-local self + 联合边缘化 | 单实体 marginal 等于 `π·P_action+(1-π)·P_auto`；多实体时至多一个 self 响应 action。**已完成**：`cal/model/branch_self_identity.py`。`{null} ∪ entities` 的**类别分布**在构造上同时排除了两种被禁设计；联合式一并给出，**因为独立 Bernoulli 设计在每个单实体边缘上都与正确模型一致、只在联合上分叉**——只查边缘的测试会给错误实现放行 |
-| **I4** | M4 + M5，产出可被 `run_candidate_lifecycle` 接受的 factory | `validate_candidate_factory` 通过；每 episode 新实例；frozen kernel 未被改动 |
+| **I4** ✅ | M4 + M5，产出可被 `run_candidate_lifecycle` 接受的 factory | `validate_candidate_factory` 通过；每 episode 新实例；frozen kernel 未被改动。**已完成**：`cal/model/permanence_candidate.py`。**两个发现**：(1) `_maybe_hidden_turn` 在实体可见时直接返回，**转向只在遮挡期发生**，所以转向概率无法从可见轨迹估计，只能从"消失—再现"间隔做极大似然；(2) 撞上了本轮自己加的 F16 守卫，按**方案 2** 处理——见下 |
+| **I4b** | 多假设关联 bank（`w_h` 不止一条 branch） | §5.6 要求保留假设 bank，当前实现只有**单条 branch**。**在此之前不得有任何确认性主张** |
 | **I5** | 在 development split 上跑通并与既有五个参照同表比较 | 产出 development 报告；**此时才第一次知道 12 个确认门在真实候选上的表现** |
 
 **I5 之前不得声称任何门控结论。** 开发集上的数字是开发数字，不是确认证据。
+
+### I4 触发的协议修订（V2 → V3）
+
+计划开头写的"反向约束"在 I4 兑现了：候选把**分数**静态图喂进转向核，撞上本轮为 F16
+加的守卫。张力是真实的——守卫说"分数 `m` 下的逐方向边缘加权不是精确后验，实测 L1
+偏差 0.0231"，而 §5.2 **明确规定**候选就用这个近似并把它列入 candidate lock。
+
+**守卫反对的从来不是近似本身，是它静默。** 因此 `autonomous_successors` 与
+`PackedKinematicFilter.step` 增加 `marginal_turn_mixture` 参数，**默认仍拒绝**；
+传入它不改变任何算术，只记录调用方知道这是哪条路径。测试钉住：二值网格上两条路径
+**逐项相等**，所以这是声明而非分叉。
+
+代价按约定照付：协议 **V3**（带 `amendment_record`）+ 两份产物重跑。
 
 ---
 

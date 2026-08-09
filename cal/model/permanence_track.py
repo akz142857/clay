@@ -128,6 +128,10 @@ class PermanenceTrack:
             no_detection_probability=no_detection_probability,
             turn_probability=turn_probability,
             allow_turn=allow_turn,
+            # The candidate infers topology rather than reading it, so the
+            # turn branch is the plan §5.2 per-direction approximation, not
+            # exact inference.  Declared here rather than left silent.
+            marginal_turn_mixture=True,
         )
         l_no = float(step["observation_evidence"])
         retained = float(step["retained_probability"])

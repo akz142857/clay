@@ -136,6 +136,7 @@ def _require_exact_turn_mixture(
     *,
     turn_probability: float,
     allow_turn: bool,
+    marginal_turn_mixture: bool,
 ) -> None:
     """Refuse the turn mixture where it is not the exact posterior.
 
@@ -146,19 +147,28 @@ def _require_exact_turn_mixture(
     a numeric probe measured an L1 deviation of 0.0231 against the exact
     topology mixture (review finding F16).
 
-    Every caller today feeds a binary grid, so nothing is wrong today.  The
-    module reserves a learned ``static_probability`` slot, though, and the
-    failure on the day it is filled would be a silently approximate posterior
-    presented as exact inference.  This makes that day raise instead.
+    The objection was never to the approximation itself -- the candidate
+    architecture prescribes exactly this per-direction weighting under an
+    inferred topology (stochastic permanence plan §5.2) and puts it inside the
+    candidate lock.  The objection was to it being *silent*: a learned
+    ``static_probability`` arriving one day and turning an exact posterior into
+    an approximate one with nothing in the code saying so.
+
+    ``marginal_turn_mixture=True`` is that statement.  It does not change the
+    arithmetic; it records that the caller knows this path is the §5.2
+    approximation rather than exact inference.  The default refuses, so silence
+    remains impossible.
     """
 
-    if not allow_turn or turn_probability <= 0.0:
+    if not allow_turn or turn_probability <= 0.0 or marginal_turn_mixture:
         return
     if np.any((static_probability > 0.0) & (static_probability < 1.0)):
         raise ValueError(
             "the turn mixture is exact only for a binary static_probability "
             "grid; fractional occupancy needs a joint-topology successor "
-            "kernel, not this per-direction marginal one"
+            "kernel, not this per-direction marginal one. Pass "
+            "marginal_turn_mixture=True to declare the plan §5.2 approximation "
+            "deliberately"
         )
 
 
@@ -289,8 +299,14 @@ def autonomous_successors(
     turn_probability: float,
     allow_turn: bool,
     spec: GridSpec,
+    marginal_turn_mixture: bool = False,
 ) -> tuple[tuple[tuple[int, int], tuple[int, int], float], ...]:
-    """Return the bounded stochastic transition under uncertain static cells."""
+    """Return the bounded stochastic transition under uncertain static cells.
+
+    ``marginal_turn_mixture`` declares that the caller accepts the plan §5.2
+    per-direction approximation on a fractional topology; see
+    ``_require_exact_turn_mixture``.
+    """
 
     if not 0.0 <= turn_probability <= 1.0:
         raise ValueError("turn_probability must be in [0, 1]")
@@ -298,7 +314,10 @@ def autonomous_successors(
         static_probability, name="static_probability", spec=spec
     )
     _require_exact_turn_mixture(
-        validated, turn_probability=turn_probability, allow_turn=allow_turn
+        validated,
+        turn_probability=turn_probability,
+        allow_turn=allow_turn,
+        marginal_turn_mixture=marginal_turn_mixture,
     )
     return _autonomous_successors_validated(
         position,
@@ -412,6 +431,7 @@ class PackedKinematicFilter:
         no_detection_probability: np.ndarray,
         turn_probability: float,
         allow_turn: bool,
+        marginal_turn_mixture: bool = False,
     ) -> dict[str, float | int]:
         if self.count < 1:
             raise EmptyPosteriorError("filter has not been reset")
@@ -427,6 +447,7 @@ class PackedKinematicFilter:
             validated_static,
             turn_probability=turn_probability,
             allow_turn=allow_turn,
+            marginal_turn_mixture=marginal_turn_mixture,
         )
         self._next_codes.fill(0)
         self._next_probability.fill(0.0)
