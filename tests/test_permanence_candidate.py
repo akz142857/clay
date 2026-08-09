@@ -248,3 +248,38 @@ def test_the_privileged_diagnostic_separates_tracking_from_belief(
     assert maps.sum() > 0.0
     # And it must use the *inferred* topology, not the world's.
     assert set(beliefs) == {(int(s.seed), int(s.step)) for s in samples}
+
+
+@pytest.mark.parametrize("true_turn_probability", [0.15, 0.75])
+def test_the_fitted_turn_probability_recovers_the_world_s(
+    true_turn_probability: float,
+) -> None:
+    """A recovery check, because a plausible-looking estimate can be inert.
+
+    The first version of this estimator returned 0.05 against a true 0.45 and
+    nothing flagged it -- the number was in range and the candidate still ran.
+    Two defects hid behind that: the topologies of every training episode were
+    pooled into one (the layout is re-randomized per episode, so that builds a
+    world with more walls than any real one), and the likelihood ignored the
+    non-detections. The second is the one that made it inert: an interval only
+    exists because the entity stayed hidden and then reappeared, and how likely
+    that is depends on the turn rate, so dropping the conditioning leaves the
+    likelihood nearly flat in the parameter being estimated.
+    """
+
+    def stream(seed: int) -> list[tuple[np.ndarray, np.ndarray]]:
+        world = RandomizedOcclusionWorld(
+            seed, hidden_turn_probability=true_turn_probability
+        )
+        frames = [world.observe()]
+        rng = np.random.default_rng(seed + 50_000)
+        for _ in range(200):
+            frames.append(world.step(int(rng.integers(0, 5))))
+        return frames
+
+    kernel = _factory().fit_kernel([stream(seed) for seed in range(62003, 62023)])
+
+    assert kernel["reacquisition_event_count"] > 100
+    # Grid resolution is 0.05; anything inside 0.15 is tracking the truth
+    # rather than reporting a flat likelihood.
+    assert abs(kernel["turn_probability"] - true_turn_probability) <= 0.15

@@ -215,7 +215,11 @@ def run_development_comparison(
     )
     privileged = privileged_belief_maps(
         evaluation_samples, frozen_kernel, beliefs,
-        turn_probability=turn_probability,
+        # The candidate's *fitted* turn probability, not the world's.  Passing
+        # the true value here would quietly hand the diagnostic a second
+        # privilege on top of the tracks, and the deficit it is meant to
+        # attribute would land in the wrong place.
+        turn_probability=float(frozen_kernel["turn_probability"]),
     )
     privileged_score = _score_maps(evaluation_samples, privileged)
 
@@ -454,7 +458,14 @@ def privileged_belief_maps(
     *,
     turn_probability: float,
 ) -> np.ndarray:
-    """The candidate's belief filter, run on the references' given tracks."""
+    """The candidate's belief filter, run on the references' given tracks.
+
+    ``turn_probability`` must come from the candidate's fitted kernel.  The
+    diagnostic is already privileged in exactly one way -- it is handed the
+    tracks -- and that is what makes it attribute the deficit.  Feeding it the
+    world's true turn rate as well would add a second privilege and move the
+    attribution somewhere it does not belong.
+    """
 
     from cal.model.permanence_track import PermanenceTrack, TrackKernel
     from cal.model.stochastic_motion_filter import EmptyPosteriorError, GridSpec

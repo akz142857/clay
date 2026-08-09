@@ -39,6 +39,7 @@ NOT part of the Phase-0/Phase-R source lock: the candidate is injected through
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from math import log
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -254,24 +255,38 @@ class StochasticPermanenceCandidate:
 # -- fitting --------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class ReacquisitionEvent:
+    """One vanish/reappear interval, with the visibility that shaped it."""
+
+    origin: tuple[int, int]
+    velocity: tuple[int, int]
+    hidden_visibility: tuple[np.ndarray, ...]
+    observed: tuple[int, int]
+
+
 def _reacquisition_events(
     frames: Sequence[tuple[np.ndarray, np.ndarray]],
     *,
     spec: GridSpec,
     camera: tuple[int, int],
-) -> list[tuple[tuple[int, int], tuple[int, int], int, tuple[int, int]]]:
-    """Unambiguous vanish/reappear intervals: ``(cell, velocity, steps, cell')``.
+) -> list[ReacquisitionEvent]:
+    """Unambiguous vanish/reappear intervals.
 
     Only intervals where exactly one tracked cell is missing are used, so the
     reappearance is identified without solving association.  Turns happen only
     while occluded, so these intervals are the only evidence about them that
-    exists.
+    exists at all.
+
+    The visibility of every step in between is kept, because the interval is
+    not a free sample: it was *selected* by staying unseen and then being seen,
+    and that selection depends on the very quantity being estimated.
     """
 
-    events = []
+    events: list[ReacquisitionEvent] = []
     previous_cells: tuple[tuple[int, int], ...] = ()
     previous_velocity: dict[tuple[int, int], tuple[int, int]] = {}
-    pending: tuple[tuple[int, int], tuple[int, int], int] | None = None
+    pending: tuple[tuple[int, int], tuple[int, int], list[np.ndarray]] | None = None
 
     for sensed, visibility in frames:
         occupied, visible = _global_masks(
@@ -280,22 +295,28 @@ def _reacquisition_events(
         cells = _arena_cells(occupied & visible, spec)
 
         if pending is not None:
-            origin, velocity, steps = pending
+            origin, velocity, masks = pending
+            masks.append(visible)
             fresh = [cell for cell in cells if cell not in previous_cells]
-            if len(fresh) == 1 and steps >= 1:
-                events.append((origin, velocity, steps, fresh[0]))
+            if len(fresh) == 1:
+                events.append(
+                    ReacquisitionEvent(
+                        origin=origin,
+                        velocity=velocity,
+                        hidden_visibility=tuple(masks),
+                        observed=fresh[0],
+                    )
+                )
                 pending = None
-            elif steps >= 24:
+            elif len(masks) >= 24:
                 pending = None
-            else:
-                pending = (origin, velocity, steps + 1)
         else:
             vanished = [cell for cell in previous_cells if cell not in cells]
             if len(vanished) == 1:
                 origin = vanished[0]
                 velocity = previous_velocity.get(origin)
                 if velocity is not None:
-                    pending = (origin, velocity, 1)
+                    pending = (origin, velocity, [visible])
 
         velocities: dict[tuple[int, int], tuple[int, int]] = {}
         for cell in cells:
@@ -310,35 +331,82 @@ def _reacquisition_events(
 
 
 def _reacquisition_log_likelihood(
-    events: Sequence[tuple[tuple[int, int], tuple[int, int], int, tuple[int, int]]],
+    episodes: Sequence[tuple[Sequence[ReacquisitionEvent], np.ndarray]],
+    *,
+    turn_probability: float,
+    spec: GridSpec,
+) -> float:
+    """Log-likelihood of every reappearance, each under *its own* topology.
+
+    The occluder layout is re-randomized per episode, so an event may only be
+    scored against the geometry of the episode it came from.  Pooling the
+    topologies -- taking, say, their union -- builds a world with more walls
+    than any real episode has, and the fitted turn probability then absorbs
+    that distortion instead of measuring turning.
+    """
+
+    total = 0.0
+    for events, static_probability in episodes:
+        for event in events:
+            total += _event_log_likelihood(
+                event,
+                turn_probability=turn_probability,
+                static_probability=static_probability,
+                spec=spec,
+            )
+    return total
+
+
+def _event_log_likelihood(
+    event: ReacquisitionEvent,
     *,
     turn_probability: float,
     static_probability: np.ndarray,
     spec: GridSpec,
 ) -> float:
-    total = 0.0
-    for origin, velocity, steps, observed in events:
-        belief = {(origin, velocity): 1.0}
-        for step in range(steps):
-            propagated: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
-            for (position, moving), mass in belief.items():
-                for new_position, new_velocity, transition in autonomous_successors(
-                    position,
-                    moving,
-                    static_probability,
-                    turn_probability=turn_probability,
-                    allow_turn=step > 0,
-                    spec=spec,
-                    marginal_turn_mixture=True,
-                ):
-                    key = (new_position, new_velocity)
-                    propagated[key] = propagated.get(key, 0.0) + mass * transition
-            belief = propagated
-        mass = sum(
-            value for (position, _v), value in belief.items() if position == observed
-        )
-        total += log(max(mass, 1e-12))
-    return total
+    """``P(stayed unseen, then seen at the observed cell)`` under this kernel.
+
+    Conditioning on the non-detections is what makes the estimate identify
+    anything.  An interval only exists because the entity stayed hidden and
+    then reappeared, and how likely that is depends on the turn rate -- an
+    entity that turns leaves the shadow at a different time and place than one
+    that does not.  Scoring only the final cell throws that away and leaves the
+    likelihood nearly flat in the parameter, which is what a grid search then
+    faithfully reports.
+    """
+
+    belief = {(event.origin, event.velocity): 1.0}
+    final = len(event.hidden_visibility) - 1
+    for step, visible in enumerate(event.hidden_visibility):
+        propagated: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
+        for (position, moving), mass in belief.items():
+            for new_position, new_velocity, transition in autonomous_successors(
+                position,
+                moving,
+                static_probability,
+                turn_probability=turn_probability,
+                allow_turn=step > 0,
+                spec=spec,
+                marginal_turn_mixture=True,
+            ):
+                key = (new_position, new_velocity)
+                propagated[key] = propagated.get(key, 0.0) + mass * transition
+        if step < final:
+            # Still hidden: every visible cell is ruled out.
+            belief = {
+                key: mass
+                for key, mass in propagated.items()
+                if not visible[key[0][1], key[0][0]]
+            }
+        else:
+            belief = {
+                key: mass
+                for key, mass in propagated.items()
+                if key[0] == event.observed
+            }
+        if not belief:
+            return log(1e-12)
+    return log(max(sum(belief.values()), 1e-12))
 
 
 class StochasticPermanenceCandidateFactory:
@@ -388,12 +456,14 @@ class StochasticPermanenceCandidateFactory:
             grid_size=self._spec.grid_size,
         )
 
-        events: list[
-            tuple[tuple[int, int], tuple[int, int], int, tuple[int, int]]
+        # Each episode carries its own layout, so events and topology stay
+        # paired rather than pooled.
+        episodes: list[
+            tuple[
+                list[tuple[tuple[int, int], tuple[int, int], int, tuple[int, int]]],
+                np.ndarray,
+            ]
         ] = []
-        static_belief = np.zeros(
-            (self._spec.grid_size, self._spec.grid_size), dtype=np.float64
-        )
         for stream in streams:
             belief = SensorOnlyStaticMap(
                 grid_size=self._spec.grid_size,
@@ -404,24 +474,27 @@ class StochasticPermanenceCandidateFactory:
             )
             for sensed, visibility in stream:
                 belief.update(sensed, visibility)
-            static_belief = np.maximum(static_belief, belief.probabilities())
-            events.extend(
-                _reacquisition_events(
-                    stream, spec=self._spec, camera=self._camera
-                )
+            episode_events = _reacquisition_events(
+                stream, spec=self._spec, camera=self._camera
             )
+            if episode_events:
+                episodes.append(
+                    (
+                        episode_events,
+                        (belief.probabilities() > 0.5).astype(np.float64),
+                    )
+                )
+        events = [event for episode_events, _ in episodes for event in episode_events]
         if not events:
             raise ValueError("train stream carries no reacquisition evidence")
 
         # Turns are unobservable while visible, so the only signal is how far
         # reappearances stray from a straight continuation.
-        hard_static = (static_belief > 0.5).astype(np.float64)
         scored = [
             (
                 _reacquisition_log_likelihood(
-                    events,
+                    episodes,
                     turn_probability=candidate,
-                    static_probability=hard_static,
                     spec=self._spec,
                 ),
                 -candidate,
