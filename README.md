@@ -346,10 +346,11 @@ been run through the confirmatory battery, and nothing here is frozen or
 gated.**
 
 The first two commands verify
-[`experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V1.json`](experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V1.json)
+[`experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V2.json`](experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V2.json)
 before doing any work and refuse to run if any of the 22 locked permanence
 sources has changed, so evidence cannot be produced by edited code. Changing one
-of those files requires a new protocol version, not an in-place edit.
+of those files requires a new protocol version — carrying an `amendment_record`
+and a regeneration of both development artifacts — not an in-place edit.
 
 The third is a non-gated feasibility census, not a scoreboard: it constructs all
 five V8 controls (`raw_sensor`, `assume_all_visible`, `time_shuffled`,

@@ -10,6 +10,7 @@ import pytest
 
 from cal.evaluation.stochastic_permanence_artifacts import (
     CAPACITY_ARTIFACT_SCHEMA_VERSION,
+    PERMANENCE_STACK_SOURCE_LOCK,
     audit_artifact_source_lock,
     exact_binomial_lower_bound,
     exact_binomial_upper_bound,
@@ -564,7 +565,13 @@ def test_frozen_source_lock_protocol_matches_the_live_stack() -> None:
     root = Path(__file__).resolve().parents[1]
     protocol = verify_locked_sources(root=root)
 
-    assert protocol["protocol_version"] == "V1"
+    assert protocol["protocol_version"] == "V2"
+    # A superseding version must say what it replaced and why, or the lock's
+    # history stops being auditable.
+    amendment = protocol["amendment_record"]
+    assert amendment["prior_protocol_path"].endswith("_V1.json")
+    assert len(amendment["prior_protocol_sha256"]) == 64
+    assert amendment["reason"]
     assert protocol["file_count"] == len(permanence_stack_source_paths(root))
     assert set(protocol["locked_source_sha256"]) == {
         path.relative_to(root).as_posix()
@@ -577,10 +584,13 @@ def test_locked_source_drift_blocks_the_runner(tmp_path: Path) -> None:
 
     root = Path(__file__).resolve().parents[1]
     workspace = tmp_path / "workspace"
+    # Derived from the constant so a protocol amendment cannot leave this
+    # copying a superseded file and silently testing nothing.
+    protocol = PERMANENCE_STACK_SOURCE_LOCK.as_posix()
     for relative in (
         *(path.relative_to(root).as_posix() for path in permanence_stack_source_paths(root)),
-        "experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V1.json",
-        "experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V1.sha256",
+        protocol,
+        protocol.replace(".json", ".sha256"),
     ):
         destination = workspace / relative
         destination.parent.mkdir(parents=True, exist_ok=True)

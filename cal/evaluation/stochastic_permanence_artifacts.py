@@ -2106,7 +2106,7 @@ def verify_source_lock(lock: Mapping[str, Any], *, root: str | Path) -> None:
 # to execute at all once a locked source has changed, so a result produced by
 # edited code cannot come into existence in the first place.
 PERMANENCE_STACK_SOURCE_LOCK = Path(
-    "experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V1.json"
+    "experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V2.json"
 )
 
 
@@ -2154,11 +2154,24 @@ def permanence_stack_source_paths(root: str | Path) -> tuple[Path, ...]:
 
 
 def build_permanence_stack_source_lock(
-    *, root: str | Path, protocol_version: str
+    *,
+    root: str | Path,
+    protocol_version: str,
+    amendment_record: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the protocol payload that pins the permanence stack."""
+    """Build the protocol payload that pins the permanence stack.
+
+    ``amendment_record`` follows the M1-M3 convention: a superseding version
+    names the protocol it replaces, its digest, and why the locked sources
+    changed.  A version after the first without one is a lock whose history
+    cannot be audited, so it is required from V2 onward.
+    """
 
     base = Path(root).resolve()
+    if protocol_version != "V1" and not amendment_record:
+        raise ValueError(
+            "a superseding source-lock protocol requires an amendment record"
+        )
     lock = source_lock(permanence_stack_source_paths(base), root=base)
     return {
         "protocol": "V2_P1_PERMANENCE_STACK_SOURCE_LOCK",
@@ -2186,6 +2199,11 @@ def build_permanence_stack_source_lock(
         "combined_sha256": lock["combined_sha256"],
         "file_count": lock["file_count"],
         "algorithm": lock["algorithm"],
+        **(
+            {"amendment_record": dict(amendment_record)}
+            if amendment_record
+            else {}
+        ),
     }
 
 
@@ -2250,7 +2268,11 @@ def verify_locked_sources(
 
 
 def mint_permanence_stack_source_lock(
-    *, root: str | Path, protocol_version: str, overwrite: bool = False
+    *,
+    root: str | Path,
+    protocol_version: str,
+    amendment_record: Mapping[str, Any] | None = None,
+    overwrite: bool = False,
 ) -> str:
     """Write the source-lock protocol and its sidecar; return the digest.
 
@@ -2262,7 +2284,9 @@ def mint_permanence_stack_source_lock(
 
     base = Path(root).resolve()
     payload = build_permanence_stack_source_lock(
-        root=base, protocol_version=protocol_version
+        root=base,
+        protocol_version=protocol_version,
+        amendment_record=amendment_record,
     )
     payload["reproduction_command"] = (
         "uv run python -c \"from cal.evaluation."

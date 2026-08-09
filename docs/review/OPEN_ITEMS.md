@@ -123,23 +123,27 @@ Phase-0 **V12**（`phase0_go`，150 seed）与 Phase-R **V6**（`phase_r_go`，
 
 ### O19 的代码侧前置守卫
 
-新增 `cal/evaluation/stochastic_permanence_holdout.py`：
-`require_custodian_salt` 拒绝公开开发盐、过短盐与单字节占位盐；
-`open_one_shot_world` 是一次性 split 生成应当走的门。
+`cal/evaluation/stochastic_permanence_custody.py` 新增
+`require_custodian_salt`（拒绝公开开发盐、过短盐、单字节占位盐）与
+`open_reserved_split_world`（一次性 split 生成应当走的门）。
+
+放在 custody 是因为它就是一条 custody 义务，而且是这个模块里**唯一无法事后补救**
+的一条：其余部分管的是什么可以被**消费**，这一条管的是什么可以被**生成**——
+等 episode 生成出来，盐已经烙进它们每一条隐藏轨迹里了。
 
 **它关的是哪个坑**：`RandomizedOcclusionWorld.__init__` 的
 `hidden_stream_salt` 有默认值（公开开发盐），所以生成脚本**漏传参数不会报错**，
 只会安静地产出一批可反演的留出。走这道门则漏传即 `TypeError`、传公开盐即
 `InvertibleSplitError`。测试 `test_the_constructor_default_is_the_trap_this_closes`
-同时钉住"构造函数确实会静默接受"与"这道门不会"。
+**同时钉住两半**——"构造函数确实会静默接受漏传"与"这道门不会"；
+只钉后者的话，哪天默认值被去掉、这道门变成多余，测试也不会告诉你。
 
-**它没有放进 custody.py**，尽管那里是语义上的自然归属。理由与代价一并记下：
-custody.py 在 22 个锁定模块内，改它需要铸协议 V2 **并重跑 3 小时 40 分的产物**，
-而这段代码目前零调用方、不可能影响 V12/V6 的任何数字。放在锁外是有依据的——
-本锁的范围是"决定当前门控证据的代码"，而未来的一次性生成器不决定其中任何一项。
-但这是一个**有意选择，不是遗漏**：测试
-`test_the_guard_is_not_inside_the_gated_source_lock` 钉住这一点，
-一旦永久性入口开始 import 它，它就变成门控证据的一部分，必须随之入锁。
+**代价照付**：custody.py 在 22 个锁定模块内，所以这次改动走了完整的修订流程——
+铸出协议 **V2**（含 `amendment_record`，指明前身 V1、其 digest 与改动理由），
+并**重跑了 phase0 与 phase-R 两份产物**。这段守卫零调用方、不可能影响任何已记录
+的数字，本可以用"声明漂移"糊过去；没有那样做，因为那正是本轮要消除的
+"锁只是描述性的"状态。**这也是永久性栈第一次真正走通修订链**——此前
+`mint_permanence_stack_source_lock` 的多版本路径从未被执行过。
 
 **重跑成本记录**：Phase-0 实测单核约 **3 小时 40 分**，且
 `--simulation-trials 1024` 是锁定常量不得调低。第一次尝试在 110 分钟处被外部
