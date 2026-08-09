@@ -23,12 +23,15 @@ restriction on the fitting data, not a privileged input.
 
 ## Scope, stated plainly
 
-The association bank here holds **one** global hypothesis (``w_h = 1``).
-Plan §5.6 requires the multi-hypothesis bank to be preserved, so this is not
-yet the complete candidate and no confirmatory claim may rest on it.  The
-branch-local machinery is already shaped for several branches -- each would own
-its own ``BranchSelfIdentity`` and track set -- so adding them is extension,
-not rework.  Tracked as I4b in the implementation plan.
+The association bank is now multi-hypothesis (I4b): ``GlobalAssociationBank``
+carries weighted branches, each owning its own track set and
+``BranchSelfIdentity``.  Two bounds remain approximations rather than exhaustive
+search -- the hypothesis count and the children generated per parent -- and both
+are declared in the fitted kernel and audited through
+``discarded_hypothesis_mass`` rather than presented as exact.
+
+What is still missing before any confirmatory claim: the candidate has never
+been scored against the twelve gates (increment I5).
 
 NOT part of the Phase-0/Phase-R source lock: the candidate is injected through
 ``CandidateFactory``, so no locked entry point imports it.
@@ -46,7 +49,8 @@ from cal.model.branch_self_identity import (
     BranchSelfIdentity,
     action_successors,
 )
-from cal.model.permanence_track import PermanenceTrack, TrackKernel
+from cal.model.association_bank import BankKernel, GlobalAssociationBank
+from cal.model.permanence_track import TrackKernel
 from cal.model.sensor_only_static_map import (
     SensorOnlyStaticMap,
     StaticMapKernel,
@@ -122,11 +126,21 @@ class StochasticPermanenceCandidate:
                 clamp=float(frozen_kernel["static_clamp"]),
             ),
         )
-        self._tracks: list[PermanenceTrack] = []
-        self._last_position: list[tuple[int, int] | None] = []
-        self._identity = BranchSelfIdentity(0, null_prior=float(
-            frozen_kernel["self_null_prior"]
-        ))
+        self._bank = GlobalAssociationBank(
+            spec=self.spec,
+            kernel=BankKernel(
+                birth_intensity=float(frozen_kernel["birth_intensity"]),
+                clutter_intensity=float(frozen_kernel["clutter_intensity"]),
+                maximum_hypotheses=int(frozen_kernel["max_hypotheses"]),
+                maximum_children_per_parent=int(
+                    frozen_kernel["max_children_per_parent"]
+                ),
+                maximum_tracks=int(frozen_kernel["max_tracks"]),
+            ),
+            track_kernel=self._track_kernel,
+            k_max=self._k_max,
+            self_null_prior=float(frozen_kernel["self_null_prior"]),
+        )
         self._steps = 0
 
     # -- observation ------------------------------------------------------
@@ -134,7 +148,7 @@ class StochasticPermanenceCandidate:
     def observe(
         self, sensed: np.ndarray, visibility: np.ndarray, action: int
     ) -> None:
-        """Fold one (observation, action) pair into the belief."""
+        """Fold one (observation, action) pair into every hypothesis."""
 
         self._static.update(sensed, visibility)
         static_probability = self._static.probabilities()
@@ -150,140 +164,35 @@ class StochasticPermanenceCandidate:
         )
         no_detection[visible] = 0.0
 
-        assignment = self._assign(detections)
-        self._advance(
-            assignment,
+        self._bank.step(
+            detections=detections,
             static_probability=static_probability,
-            no_detection=no_detection,
+            no_detection_probability=no_detection,
+            visible=visible,
+            turn_probability=self.turn_probability,
+            allow_turn=self._steps > 0,
             action=int(action),
+            self_likelihood_ratio=self._self_likelihood_ratio,
         )
-        self._birth(detections, assignment)
-        self._retire()
         self._steps += 1
-
-    def _assign(
-        self, detections: Sequence[tuple[int, int]]
-    ) -> dict[int, tuple[int, int]]:
-        """Greedy nearest-cell assignment within one hypothesis.
-
-        A single branch cannot represent association ambiguity, which is the
-        §5.6 gap this increment leaves open; the greedy choice is deterministic
-        so at least the omission is reproducible.
-        """
-
-        remaining = list(detections)
-        assignment: dict[int, tuple[int, int]] = {}
-        for index, track in enumerate(self._tracks):
-            if not remaining:
-                break
-            marginal = track.position_marginal()
-            if not marginal:
-                continue
-            best = max(sorted(marginal), key=lambda cell: marginal[cell])
-            reachable = [
-                cell
-                for cell in remaining
-                if abs(cell[0] - best[0]) + abs(cell[1] - best[1]) <= 1
-            ]
-            if not reachable:
-                continue
-            chosen = min(
-                reachable,
-                key=lambda cell: (
-                    abs(cell[0] - best[0]) + abs(cell[1] - best[1]),
-                    cell,
-                ),
-            )
-            assignment[index] = chosen
-            remaining.remove(chosen)
-        return assignment
-
-    def _advance(
-        self,
-        assignment: Mapping[int, tuple[int, int]],
-        *,
-        static_probability: np.ndarray,
-        no_detection: np.ndarray,
-        action: int,
-    ) -> None:
-        ratios: list[float] = []
-        survivors: list[PermanenceTrack] = []
-        positions: list[tuple[int, int] | None] = []
-
-        for index, track in enumerate(self._tracks):
-            previous = self._last_position[index]
-            detection = assignment.get(index)
-            if detection is not None:
-                ratio = self._self_likelihood_ratio(
-                    track,
-                    previous=previous,
-                    observed=detection,
-                    static_probability=static_probability,
-                    action=action,
-                )
-                velocity = (
-                    (detection[0] - previous[0], detection[1] - previous[1])
-                    if previous is not None
-                    else (0, 0)
-                )
-                if velocity not in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                    velocity = (1, 0)
-                # Detections in this world are exact cell occupancy, so a match
-                # collapses the posterior rather than merely reweighting it.
-                track.reset(detection, velocity)
-                survivors.append(track)
-                positions.append(detection)
-                ratios.append(ratio)
-                continue
-
-            try:
-                track.step_unobserved(
-                    static_probability=static_probability,
-                    no_detection_probability=no_detection,
-                    turn_probability=self.turn_probability,
-                    allow_turn=self._steps > 0,
-                )
-            except EmptyPosteriorError:
-                # Every state this track could occupy was visible and empty.
-                # Dropping it is a storage consequence of a branch that ran out
-                # of explanations, not observed death evidence.
-                continue
-            survivors.append(track)
-            positions.append(None)
-            ratios.append(1.0)
-
-        self._tracks = survivors
-        self._last_position = positions
-        self._resize_identity(len(survivors))
-        if survivors:
-            self._identity.update(ratios, null_likelihood=1.0)
 
     def _self_likelihood_ratio(
         self,
-        track: PermanenceTrack,
-        *,
         previous: tuple[int, int] | None,
         observed: tuple[int, int],
         static_probability: np.ndarray,
         action: int,
     ) -> float:
-        """``P_action(observed) / P_auto(observed)`` for this entity.
+        """``P_action(observed) / P_auto(observed)`` for one entity.
 
-        The common autonomous factors of the other entities cancel in the
-        categorical update, so the ratio is all that is needed -- which is also
-        why ``null_likelihood`` is 1.
+        The other entities' autonomous factors are common to every class and
+        cancel in the categorical update, which is why the ratio suffices and
+        ``null_likelihood`` is 1.
         """
 
         if previous is None:
             return 1.0
-        marginal = track.position_marginal()
-        if not marginal:
-            return 1.0
-        origin = max(sorted(marginal), key=lambda cell: marginal[cell])
-        velocity = (origin[0] - previous[0], origin[1] - previous[1])
-        if velocity not in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            velocity = (1, 0)
-
+        velocity = (1, 0)
         action_mass = sum(
             mass
             for position, _velocity, mass in action_successors(
@@ -300,7 +209,6 @@ class StochasticPermanenceCandidate:
                 turn_probability=self.turn_probability,
                 allow_turn=True,
                 spec=self.spec,
-                marginal_turn_mixture=True,
             )
             if position == observed
         )
@@ -308,95 +216,33 @@ class StochasticPermanenceCandidate:
             return 1.0 if action_mass <= 0.0 else float(len(ACTION_DELTAS))
         return float(action_mass / autonomous_mass)
 
-    def _resize_identity(self, count: int) -> None:
-        if self._identity.entity_count == count:
-            return
-        self._identity = BranchSelfIdentity(
-            count, null_prior=float(self._kernel["self_null_prior"])
-        )
-
-    def _birth(
-        self,
-        detections: Sequence[tuple[int, int]],
-        assignment: Mapping[int, tuple[int, int]],
-    ) -> None:
-        claimed = set(assignment.values())
-        for cell in detections:
-            if cell in claimed:
-                continue
-            if len(self._tracks) >= int(self._kernel["max_tracks"]):
-                break
-            track = PermanenceTrack(
-                k_max=self._k_max, spec=self.spec, kernel=self._track_kernel
-            )
-            # Birth existence is 1: the branch prior already carries the birth
-            # intensity, so boosting it again double-counts the same event.
-            track.reset(cell, (1, 0))
-            self._tracks.append(track)
-            self._last_position.append(cell)
-        self._resize_identity(len(self._tracks))
-
-    def _retire(self) -> None:
-        keep = [
-            index
-            for index, track in enumerate(self._tracks)
-            if not track.retired()
-        ]
-        if len(keep) == len(self._tracks):
-            return
-        self._tracks = [self._tracks[index] for index in keep]
-        self._last_position = [self._last_position[index] for index in keep]
-        self._resize_identity(len(self._tracks))
-
     # -- readout ----------------------------------------------------------
 
     def occupancy(self) -> np.ndarray:
-        """``P_occ(c) = 1 - (1 - m_t(c))·(1 - P_dynamic(c))`` over the grid.
-
-        The dynamic term is the §5.5 Bernoulli union under the stated bounded
-        approximation: given the hypothesis, entity existence and spatial
-        factors are conditionally independent.
-        """
+        """``P_occ(c) = 1 - (1 - m_t(c))·(1 - P_dynamic(c))`` over the grid."""
 
         static = self._static.probabilities()
-        free = np.ones_like(static)
-        for track in self._tracks:
-            for (x, y), mass in track.occupancy().items():
-                free[y, x] *= 1.0 - min(max(mass, 0.0), 1.0)
-        dynamic = 1.0 - free
-        return 1.0 - (1.0 - static) * (1.0 - dynamic)
+        return 1.0 - (1.0 - static) * (1.0 - self.hidden_occupancy())
 
     def hidden_occupancy(self) -> np.ndarray:
-        """Dynamic occupancy alone, which is what the permanence task scores."""
+        """``Σ_h w_h·[1 - Π_i(1 - e_hi·q_hi)]`` -- what permanence is scored on."""
 
-        free = np.ones(
-            (self.spec.grid_size, self.spec.grid_size), dtype=np.float64
-        )
-        for track in self._tracks:
-            for (x, y), mass in track.occupancy().items():
-                free[y, x] *= 1.0 - min(max(mass, 0.0), 1.0)
-        return 1.0 - free
+        return self._bank.occupancy()
 
     def track_positions(self) -> tuple[tuple[int, int], ...]:
-        """MAP position of every entity above the existence threshold.
-
-        Ties break on canonical cell order so the readout is deterministic.
-        """
-
-        positions: list[tuple[int, int]] = []
-        for track in self._tracks:
-            if track.retired():
-                continue
-            marginal = track.position_marginal()
-            if not marginal:
-                continue
-            positions.append(
-                max(sorted(marginal), key=lambda cell: marginal[cell])
-            )
-        return tuple(sorted(positions))
+        return self._bank.track_positions()
 
     def self_probabilities(self) -> np.ndarray:
-        return self._identity.probabilities()
+        return self._bank.most_likely().identity.probabilities()
+
+    def hypothesis_weights(self) -> np.ndarray:
+        return self._bank.weights()
+
+    @property
+    def discarded_hypothesis_mass(self) -> float:
+        """Weight the hypothesis bound cost, audited rather than hidden."""
+
+        return self._bank.discarded_hypothesis_mass
 
 
 # -- fitting --------------------------------------------------------------
@@ -501,6 +347,10 @@ class StochasticPermanenceCandidateFactory:
         camera: tuple[int, int],
         k_max: int = 96,
         max_tracks: int = 8,
+        max_hypotheses: int = 5,
+        max_children_per_parent: int = 4,
+        birth_intensity: float = 0.1,
+        clutter_intensity: float = 0.01,
         survival_probability: float = 0.995,
         retirement_existence: float = 0.02,
         self_null_prior: float = 0.5,
@@ -511,6 +361,10 @@ class StochasticPermanenceCandidateFactory:
         self._camera = (int(camera[0]), int(camera[1]))
         self._k_max = int(k_max)
         self._max_tracks = int(max_tracks)
+        self._max_hypotheses = int(max_hypotheses)
+        self._max_children_per_parent = int(max_children_per_parent)
+        self._birth_intensity = float(birth_intensity)
+        self._clutter_intensity = float(clutter_intensity)
         self._survival_probability = float(survival_probability)
         self._retirement_existence = float(retirement_existence)
         self._self_null_prior = float(self_null_prior)
@@ -579,6 +433,10 @@ class StochasticPermanenceCandidateFactory:
             "camera_y": self._camera[1],
             "k_max": self._k_max,
             "max_tracks": self._max_tracks,
+            "max_hypotheses": self._max_hypotheses,
+            "max_children_per_parent": self._max_children_per_parent,
+            "birth_intensity": self._birth_intensity,
+            "clutter_intensity": self._clutter_intensity,
             "survival_probability": self._survival_probability,
             "retirement_existence": self._retirement_existence,
             "self_null_prior": self._self_null_prior,
@@ -609,4 +467,6 @@ def run_episode(
         "steps": steps,
         "track_positions": [list(cell) for cell in candidate.track_positions()],
         "hidden_occupancy": candidate.hidden_occupancy().tolist(),
+        "hypothesis_count": int(candidate.hypothesis_weights().size),
+        "discarded_hypothesis_mass": candidate.discarded_hypothesis_mass,
     }

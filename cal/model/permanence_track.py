@@ -40,6 +40,7 @@ from cal.model.stochastic_motion_filter import (
     EmptyPosteriorError,
     GridSpec,
     PackedKinematicFilter,
+    autonomous_successors,
 )
 
 
@@ -149,6 +150,46 @@ class PermanenceTrack:
             "no_detection_evidence": l_no,
             "branch_evidence": evidence,
         }
+
+    @property
+    def predicted_existence(self) -> float:
+        """``e_pred = p_survive · e`` -- before any observation is applied."""
+
+        return self.kernel.survival_probability * self.existence
+
+    def predicted_states(
+        self,
+        *,
+        static_probability: np.ndarray,
+        turn_probability: float,
+        allow_turn: bool,
+    ) -> dict[tuple[tuple[int, int], tuple[int, int]], float]:
+        """``q_pred`` as an explicit distribution, committing nothing.
+
+        The bounded filter fuses prediction and update into one atomic step,
+        which is right for a single hypothesis but not enough for an
+        association bank: deciding *whether* to match a detection needs
+        ``Z_match`` and ``Z_miss``, and both are integrals over the predicted
+        posterior.  This recomputes the propagation instead of splitting the
+        filter's step, so the committed path stays exactly the one Phase R
+        verified.
+        """
+
+        predicted: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
+        for code, mass in self._filter.items():
+            position, velocity = self._filter.spec.decode(code)
+            for new_position, new_velocity, transition in autonomous_successors(
+                position,
+                velocity,
+                static_probability,
+                turn_probability=turn_probability,
+                allow_turn=allow_turn,
+                spec=self._filter.spec,
+                marginal_turn_mixture=True,
+            ):
+                key = (new_position, new_velocity)
+                predicted[key] = predicted.get(key, 0.0) + mass * transition
+        return predicted
 
     def detection_evidence(self, emission_probability: np.ndarray) -> float:
         """``Z_match`` for a matched detection, without applying it.
