@@ -213,3 +213,38 @@ def test_the_self_label_stays_a_normalized_categorical(
         probabilities = candidate.self_probabilities()
         assert probabilities.sum() == pytest.approx(1.0)
         assert np.all(probabilities >= 0.0)
+
+
+def test_the_privileged_diagnostic_separates_tracking_from_belief(
+    frozen_kernel: dict,
+) -> None:
+    """The references are handed `hidden_tracks`; the candidate infers them.
+
+    A single scoreboard therefore cannot say whether a deficit is weak belief
+    maintenance or weak tracking, and those call for opposite responses.  This
+    checks the diagnostic runs the candidate's belief filter on the references'
+    tracks, which is what makes the two separable.
+    """
+
+    from cal.evaluation.permanence_candidate_development import (
+        inferred_static_beliefs,
+        privileged_belief_maps,
+    )
+    from cal.evaluation.permanence_forward_benchmark import _collect_many
+
+    samples = _collect_many(
+        [62149], steps=200, warmup=12, turn_probability=0.45
+    )
+    beliefs = inferred_static_beliefs(
+        samples, frozen_kernel, steps=200, turn_probability=0.45
+    )
+    maps = privileged_belief_maps(
+        samples, frozen_kernel, beliefs, turn_probability=0.45
+    )
+
+    assert maps.shape == (len(samples), 121)
+    assert np.all((maps >= 0.0) & (maps <= 1.0))
+    # It must actually carry belief mass, or it is measuring nothing.
+    assert maps.sum() > 0.0
+    # And it must use the *inferred* topology, not the world's.
+    assert set(beliefs) == {(int(s.seed), int(s.step)) for s in samples}

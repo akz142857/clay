@@ -208,14 +208,27 @@ def run_development_comparison(
     )
     candidate_score = _score_maps(evaluation_samples, maps)
 
+    # Privileged: the candidate's belief machinery on the references' tracks.
+    beliefs = inferred_static_beliefs(
+        evaluation_samples, frozen_kernel, steps=steps,
+        turn_probability=turn_probability,
+    )
+    privileged = privileged_belief_maps(
+        evaluation_samples, frozen_kernel, beliefs,
+        turn_probability=turn_probability,
+    )
+    privileged_score = _score_maps(evaluation_samples, privileged)
+
     predictors = {
         "candidate": candidate_score,
+        "privileged_belief_diagnostic": privileged_score,
         "oracle": reference["predictors"]["belief"],
         "geometric": reference["predictors"]["geometric"],
         "belief_free": reference["predictors"]["belief_free"],
     }
     by_bin = {
         "candidate": _bin_scores(evaluation_samples, maps),
+        "privileged_belief_diagnostic": _bin_scores(evaluation_samples, privileged),
         **{
             name: reference["ranking_by_occlusion_length"].get(source, {})
             for name, source in (
@@ -227,6 +240,7 @@ def run_development_comparison(
     }
 
     closure = _closure_report(by_bin)
+    decomposition = _decompose(by_bin)
     return {
         "status": "development_only_non_gated",
         "gated": False,
@@ -245,6 +259,10 @@ def run_development_comparison(
         "predictors": predictors,
         "by_occlusion_length": by_bin,
         "closure": closure,
+        "tracking_versus_belief": decomposition,
+        "privileged_diagnostic_only": [
+            "privileged_belief_diagnostic",
+        ],
     }
 
 
@@ -265,6 +283,32 @@ def _bin_scores(
         for name, indices in sorted(grouped.items())
         if indices
     }
+
+
+def _decompose(by_bin: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Split the candidate's deficit into a tracking part and a belief part.
+
+    With the references' tracks held fixed, ``privileged - belief_free`` is what
+    belief maintenance buys.  ``candidate - privileged`` is what inferring the
+    tracks instead of being handed them costs.  Reporting only the total would
+    leave the two indistinguishable, and they call for opposite responses.
+    """
+
+    result: dict[str, Any] = {}
+    for name in ("2-3", "4-5", "6+"):
+        try:
+            candidate = float(by_bin["candidate"][name]["top1_accuracy"])
+            privileged = float(
+                by_bin["privileged_belief_diagnostic"][name]["top1_accuracy"]
+            )
+            floor = float(by_bin["belief_free"][name]["top1_accuracy"])
+        except (KeyError, TypeError):
+            continue
+        result[name] = {
+            "belief_gain_with_tracking_held_fixed": privileged - floor,
+            "tracking_cost": candidate - privileged,
+        }
+    return result
 
 
 def _closure_report(by_bin: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
@@ -337,3 +381,114 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# --------------------------------------------------------------------------
+# Privileged diagnostic: how much of the gap is tracking, how much is belief
+# --------------------------------------------------------------------------
+#
+# The references read `sample.hidden_tracks`, so the collector hands them the
+# last-seen cell, the observed velocity and the hidden duration.  The candidate
+# infers all three.  A single scoreboard therefore cannot say whether a deficit
+# comes from weak belief maintenance or from weak tracking -- and those call
+# for opposite responses.
+#
+# This runs the candidate's *belief* machinery on the references' *tracks*:
+#
+#     belief_free          given tracks, no belief filtering
+#     this diagnostic      given tracks, candidate belief, inferred topology
+#     oracle               given tracks, exact belief, true topology
+#     candidate            inferred tracks, candidate belief, inferred topology
+#
+# so `diagnostic - belief_free` is what belief maintenance buys with tracking
+# held fixed, and `candidate - diagnostic` is what the candidate's tracking
+# costs.  PRIVILEGED: it consumes evaluator bookkeeping and can never be a
+# formal candidate result.
+
+
+def inferred_static_beliefs(
+    samples: Sequence[_Sample],
+    frozen_kernel: Mapping[str, Any],
+    *,
+    steps: int,
+    turn_probability: float,
+) -> dict[tuple[int, int], np.ndarray]:
+    """The candidate's own static belief at each sample's step."""
+
+    from cal.model.sensor_only_static_map import (
+        SensorOnlyStaticMap,
+        StaticMapKernel,
+    )
+
+    wanted: dict[int, set[int]] = {}
+    for sample in samples:
+        wanted.setdefault(int(sample.seed), set()).add(int(sample.step))
+
+    beliefs: dict[tuple[int, int], np.ndarray] = {}
+    for seed, want in wanted.items():
+        belief = SensorOnlyStaticMap(
+            grid_size=int(frozen_kernel["grid_size"]),
+            arena_low=int(frozen_kernel["arena_low"]),
+            arena_high=int(frozen_kernel["arena_high"]),
+            camera=(int(frozen_kernel["camera_x"]), int(frozen_kernel["camera_y"])),
+            kernel=StaticMapKernel(
+                prior=float(frozen_kernel["static_prior"]),
+                mover_occupancy=float(frozen_kernel["static_mover_occupancy"]),
+                clamp=float(frozen_kernel["static_clamp"]),
+            ),
+        )
+        frames = _episode_observations(
+            seed, steps=steps, turn_probability=turn_probability
+        )
+        for step, (sensed, visibility, _action) in enumerate(frames):
+            belief.update(sensed, visibility)
+            if step in want:
+                beliefs[(seed, step)] = belief.probabilities()
+    return beliefs
+
+
+def privileged_belief_maps(
+    samples: Sequence[_Sample],
+    frozen_kernel: Mapping[str, Any],
+    beliefs: Mapping[tuple[int, int], np.ndarray],
+    *,
+    turn_probability: float,
+) -> np.ndarray:
+    """The candidate's belief filter, run on the references' given tracks."""
+
+    from cal.model.permanence_track import PermanenceTrack, TrackKernel
+    from cal.model.stochastic_motion_filter import EmptyPosteriorError, GridSpec
+
+    spec = GridSpec(
+        grid_size=int(frozen_kernel["grid_size"]),
+        arena_low=int(frozen_kernel["arena_low"]),
+        arena_high=int(frozen_kernel["arena_high"]),
+    )
+    track_kernel = TrackKernel(
+        survival_probability=float(frozen_kernel["survival_probability"]),
+        retirement_existence=float(frozen_kernel["retirement_existence"]),
+    )
+    maps = np.zeros((len(samples), _SIDE * _SIDE), dtype=np.float64)
+    for index, sample in enumerate(samples):
+        static = beliefs[(int(sample.seed), int(sample.step))]
+        no_detection = 1.0 - np.asarray(sample.visible, dtype=np.float64)
+        free = np.ones(_SIDE * _SIDE, dtype=np.float64)
+        for last_seen, velocity, hidden_steps in sample.hidden_tracks:
+            track = PermanenceTrack(
+                k_max=int(frozen_kernel["k_max"]), spec=spec, kernel=track_kernel
+            )
+            track.reset(last_seen, velocity)
+            try:
+                for step in range(int(hidden_steps)):
+                    track.step_unobserved(
+                        static_probability=static,
+                        no_detection_probability=no_detection,
+                        turn_probability=turn_probability,
+                        allow_turn=step > 0,
+                    )
+            except EmptyPosteriorError:
+                continue
+            for cell, mass in track.occupancy().items():
+                free[_cell_index(cell)] *= 1.0 - min(max(mass, 0.0), 1.0)
+        maps[index] = 1.0 - free
+    return maps
