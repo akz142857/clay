@@ -565,13 +565,20 @@ def test_frozen_source_lock_protocol_matches_the_live_stack() -> None:
     root = Path(__file__).resolve().parents[1]
     protocol = verify_locked_sources(root=root)
 
-    assert protocol["protocol_version"] == "V2"
-    # A superseding version must say what it replaced and why, or the lock's
-    # history stops being auditable.
-    amendment = protocol["amendment_record"]
-    assert amendment["prior_protocol_path"].endswith("_V1.json")
-    assert len(amendment["prior_protocol_sha256"]) == 64
-    assert amendment["reason"]
+    # Derived from the constant rather than hardcoded, so an amendment does not
+    # require hand-editing this test -- which is how a version assertion decays
+    # into being updated reflexively instead of checked.
+    expected = PERMANENCE_STACK_SOURCE_LOCK.stem.rsplit("_", 1)[-1]
+    assert protocol["protocol_version"] == expected
+
+    # Every version after the first must say what it replaced and why, or the
+    # lock's history stops being auditable.
+    if expected != "V1":
+        amendment = protocol["amendment_record"]
+        assert amendment["prior_protocol_path"].endswith(".json")
+        assert amendment["prior_protocol_path"] != str(PERMANENCE_STACK_SOURCE_LOCK)
+        assert len(amendment["prior_protocol_sha256"]) == 64
+        assert amendment["reason"]
     assert protocol["file_count"] == len(permanence_stack_source_paths(root))
     assert set(protocol["locked_source_sha256"]) == {
         path.relative_to(root).as_posix()

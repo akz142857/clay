@@ -373,3 +373,53 @@ def test_factor_replacement_rejects_a_repeated_state_code() -> None:
             np.array([code, code], dtype=np.uint16),
             np.array([0.5, 0.5], dtype=np.float64),
         )
+
+
+def test_a_fractional_topology_needs_the_approximation_declared() -> None:
+    """The turn mixture is exact only over a binary topology (finding F16).
+
+    The objection was never to the approximation -- plan §5.2 prescribes exactly
+    this per-direction weighting for an inferred topology and puts it in the
+    candidate lock.  The objection was to it being silent.  So the default
+    refuses and the opt-in is a statement, not a bypass: same arithmetic, but
+    the caller has said which one it is.
+    """
+
+    static = np.zeros((25, 25), dtype=np.float64)
+    static[12, 13] = 0.3
+
+    with pytest.raises(ValueError, match="marginal_turn_mixture=True"):
+        autonomous_successors(
+            (12, 12),
+            (1, 0),
+            static,
+            turn_probability=0.45,
+            allow_turn=True,
+            spec=EVALUATION_GRID_SPEC,
+        )
+
+    declared = autonomous_successors(
+        (12, 12),
+        (1, 0),
+        static,
+        turn_probability=0.45,
+        allow_turn=True,
+        spec=EVALUATION_GRID_SPEC,
+        marginal_turn_mixture=True,
+    )
+    assert sum(mass for *_rest, mass in declared) == pytest.approx(1.0)
+
+
+def test_declaring_the_approximation_does_not_change_exact_results() -> None:
+    """On a binary grid both paths must agree exactly, or the flag is a fork."""
+
+    static = _static_map({(14, 12), (9, 10)})
+    common = dict(
+        turn_probability=0.35, allow_turn=True, spec=EVALUATION_GRID_SPEC
+    )
+
+    assert autonomous_successors(
+        (13, 12), (1, 0), static, **common
+    ) == autonomous_successors(
+        (13, 12), (1, 0), static, marginal_turn_mixture=True, **common
+    )

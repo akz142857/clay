@@ -40,6 +40,8 @@ from cal.model.stochastic_motion_filter import (
     EmptyPosteriorError,
     GridSpec,
     PackedKinematicFilter,
+    UNIT_VELOCITIES,
+    autonomous_successors,
 )
 
 
@@ -108,6 +110,38 @@ class PermanenceTrack:
         self.existence = float(existence)
         self.branch_log_weight = 0.0
 
+    def reset_unknown_velocity(
+        self, position: tuple[int, int], *, existence: float = 1.0
+    ) -> None:
+        """Start a track whose velocity has not been observed yet.
+
+        A single detection fixes where an entity is and says nothing about
+        where it is going.  Committing to one direction anyway is not a
+        neutral default -- it is an unsupported assertion that costs most
+        exactly where permanence is measured, because the first few hidden
+        steps are propagated in a direction nobody observed.  A uniform prior
+        over the four unit velocities is what the observation actually
+        licenses.
+        """
+
+        if not 0.0 < existence <= 1.0:
+            raise ValueError("initial existence must be in (0, 1]")
+        spec = self._filter.spec
+        codes = [spec.encode(position, velocity) for velocity in UNIT_VELOCITIES]
+        if len(codes) > self._filter.k_max:
+            raise ValueError("k_max cannot hold a uniform velocity prior")
+        self._filter.codes.fill(0)
+        self._filter.probability.fill(0.0)
+        for index, code in enumerate(sorted(codes)):
+            self._filter.codes[index] = code
+            self._filter.probability[index] = 1.0 / len(codes)
+        self._filter.count = len(codes)
+        self._filter.branch_log_weight = 0.0
+        self._filter.cumulative_retained_probability = 1.0
+        self._filter.maximum_step_pruned_mass = 0.0
+        self.existence = float(existence)
+        self.branch_log_weight = 0.0
+
     def step_unobserved(
         self,
         *,
@@ -128,6 +162,10 @@ class PermanenceTrack:
             no_detection_probability=no_detection_probability,
             turn_probability=turn_probability,
             allow_turn=allow_turn,
+            # The candidate infers topology rather than reading it, so the
+            # turn branch is the plan §5.2 per-direction approximation, not
+            # exact inference.  Declared here rather than left silent.
+            marginal_turn_mixture=True,
         )
         l_no = float(step["observation_evidence"])
         retained = float(step["retained_probability"])
@@ -145,6 +183,46 @@ class PermanenceTrack:
             "no_detection_evidence": l_no,
             "branch_evidence": evidence,
         }
+
+    @property
+    def predicted_existence(self) -> float:
+        """``e_pred = p_survive · e`` -- before any observation is applied."""
+
+        return self.kernel.survival_probability * self.existence
+
+    def predicted_states(
+        self,
+        *,
+        static_probability: np.ndarray,
+        turn_probability: float,
+        allow_turn: bool,
+    ) -> dict[tuple[tuple[int, int], tuple[int, int]], float]:
+        """``q_pred`` as an explicit distribution, committing nothing.
+
+        The bounded filter fuses prediction and update into one atomic step,
+        which is right for a single hypothesis but not enough for an
+        association bank: deciding *whether* to match a detection needs
+        ``Z_match`` and ``Z_miss``, and both are integrals over the predicted
+        posterior.  This recomputes the propagation instead of splitting the
+        filter's step, so the committed path stays exactly the one Phase R
+        verified.
+        """
+
+        predicted: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
+        for code, mass in self._filter.items():
+            position, velocity = self._filter.spec.decode(code)
+            for new_position, new_velocity, transition in autonomous_successors(
+                position,
+                velocity,
+                static_probability,
+                turn_probability=turn_probability,
+                allow_turn=allow_turn,
+                spec=self._filter.spec,
+                marginal_turn_mixture=True,
+            ):
+                key = (new_position, new_velocity)
+                predicted[key] = predicted.get(key, 0.0) + mass * transition
+        return predicted
 
     def detection_evidence(self, emission_probability: np.ndarray) -> float:
         """``Z_match`` for a matched detection, without applying it.
