@@ -72,7 +72,7 @@ G4（锁未覆盖 `v2_m3.py` 与真值模拟器）：**M1–M3 侧不变**；永
 | O16 | 闭合比例是否沿用 **0.40** | 当前实现即 0.40，理由是与既有 `6+/top1_closure_0.40` 同值、不新造阈值 |
 | O17 | 留出规模 | `recommended_holdout_seed_count` = **11078**。**新增约束**：O2 实测 `identity_scrambled` 只在 **16.7%**（2081/12473）的事件上可构造，留出规模须按该比例折算 |
 | O18 | 冻结授权 | 本轮改动了预注册的锁定常量与门定义；按 [`REVIEW_PLAN.md`](REVIEW_PLAN.md) §8，冻结需评审 `pass` 且**人类 Gatekeeper 签署** |
-| O19 | 留出密盐 | F9 的设计要求保管人持有密盐。**必须在生成任何留出 seed 之前就位**，事后改代码无法补救已生成的留出。`DEFAULT_HIDDEN_STREAM_SALT` 是公开的开发盐，**不得**用于留出 |
+| O19 | 留出密盐 | F9 的设计要求保管人持有密盐。**必须在生成任何留出 seed 之前就位**，事后改代码无法补救已生成的留出。`DEFAULT_HIDDEN_STREAM_SALT` 是公开的开发盐，**不得**用于留出。**代码侧的前置守卫已就位**（见下），但"谁持有那个秘密"仍是人的事，不是代码能替代的 |
 
 ---
 
@@ -120,6 +120,26 @@ Phase-0 **V12**（`phase0_go`，150 seed）与 Phase-R **V6**（`phase_r_go`，
 本轮修的是验证与记账，不是效应量。
 
 回归：`uv run pytest` **413 passed**（本轮之前 396）。
+
+### O19 的代码侧前置守卫
+
+新增 `cal/evaluation/stochastic_permanence_holdout.py`：
+`require_custodian_salt` 拒绝公开开发盐、过短盐与单字节占位盐；
+`open_one_shot_world` 是一次性 split 生成应当走的门。
+
+**它关的是哪个坑**：`RandomizedOcclusionWorld.__init__` 的
+`hidden_stream_salt` 有默认值（公开开发盐），所以生成脚本**漏传参数不会报错**，
+只会安静地产出一批可反演的留出。走这道门则漏传即 `TypeError`、传公开盐即
+`InvertibleSplitError`。测试 `test_the_constructor_default_is_the_trap_this_closes`
+同时钉住"构造函数确实会静默接受"与"这道门不会"。
+
+**它没有放进 custody.py**，尽管那里是语义上的自然归属。理由与代价一并记下：
+custody.py 在 22 个锁定模块内，改它需要铸协议 V2 **并重跑 3 小时 40 分的产物**，
+而这段代码目前零调用方、不可能影响 V12/V6 的任何数字。放在锁外是有依据的——
+本锁的范围是"决定当前门控证据的代码"，而未来的一次性生成器不决定其中任何一项。
+但这是一个**有意选择，不是遗漏**：测试
+`test_the_guard_is_not_inside_the_gated_source_lock` 钉住这一点，
+一旦永久性入口开始 import 它，它就变成门控证据的一部分，必须随之入锁。
 
 **重跑成本记录**：Phase-0 实测单核约 **3 小时 40 分**，且
 `--simulation-trials 1024` 是锁定常量不得调低。第一次尝试在 110 分钟处被外部
