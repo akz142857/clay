@@ -78,8 +78,8 @@ run_candidate_lifecycle(factory, *, train_sensor_streams,
 
 | 增量 | 内容 | 完成判据 |
 | --- | --- | --- |
-| **I1** | M1 `SensorOnlyFrontEnd` | 从 sensed patch 序列重建 `m_t`；对已观察为自由的格 `m→0`、未观察格保持先验、界外恒 1；**与真值 static 的一致性只作诊断断言，绝不作为输入** |
-| **I2** | M2 存在性通道 | 单实体、无关联歧义下，逐步 `e_t` 与 `branch_log_weight` 与 §5.3 公式逐项吻合 |
+| **I1** ✅ | M1 `SensorOnlyFrontEnd` | 从 sensed patch 序列重建 `m_t`；对已观察为自由的格 `m→0`、未观察格保持先验、界外恒 1；**与真值 static 的一致性只作诊断断言，绝不作为输入**。**已完成**：`cal/model/sensor_only_static_map.py`，实测恢复 24/31 场内静态格、零假阳性 |
+| **I2** ✅ | M2 存在性通道 | 单实体、无关联歧义下，逐步 `e_t` 与 `branch_log_weight` 与 §5.3 公式逐项吻合。**已完成**：`cal/model/permanence_track.py`。**关键点是不双重计数**——`PackedKinematicFilter` 报告的 `observation_evidence` 就是 `L_no`，其自带的 `branch_log_weight` 是无存在性版本；轨道只叠加存在性感知的证据 + 剪枝损失 |
 | **I3** | M3 branch-local self + 联合边缘化 | 单实体 marginal 等于 `π·P_action+(1-π)·P_auto`；多实体时至多一个 self 响应 action |
 | **I4** | M4 + M5，产出可被 `run_candidate_lifecycle` 接受的 factory | `validate_candidate_factory` 通过；每 episode 新实例；frozen kernel 未被改动 |
 | **I5** | 在 development split 上跑通并与既有五个参照同表比较 | 产出 development 报告；**此时才第一次知道 12 个确认门在真实候选上的表现** |
