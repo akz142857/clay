@@ -36,8 +36,11 @@ graph:
     entity_graph (optional) -- the deployed I1 entity belief graph, updated
                   online from the same sensed-patch + action sequence.
 
-The whole module is NON-GATED analysis: no frozen protocol, no source lock, no
-one-shot evidence, and it runs only on fresh unreserved seeds.
+The whole module is NON-GATED analysis: no frozen protocol and no one-shot
+evidence, and it runs only on fresh unreserved seeds.  It is not unlocked,
+though -- the Phase-0 and Phase-R artifacts both record this file in their
+``source_lock``, so editing it invalidates their provenance claim and the
+drift test in ``tests/test_stochastic_permanence_artifacts.py`` will say so.
 
 Run:
     uv run python -m cal.evaluation.permanence_forward_benchmark
@@ -58,6 +61,9 @@ from cal.evaluation.randomized_occlusion_world import (
     _bounce_advance,
     RandomizedOcclusionWorld,
 )
+from cal.evaluation.stochastic_permanence_custody import (
+    validate_disjoint_seed_sets,
+)
 from cal.evaluation.v2_i1_integration import (
     ARENA_HIGH,
     ARENA_LOW,
@@ -68,6 +74,44 @@ from cal.evaluation.v2_i1_integration import (
 
 _EPS = 1e-6
 _DEFAULT_TURN_PROBABILITY = 0.35
+
+# The action stream is the episode seed shifted by this much, while the layout
+# stream is the seed itself.  Two episodes exactly this far apart therefore
+# share a stream: one episode's actions replay the other's layout draw.  The
+# spacing was never asserted (review finding F23); the ranges in use are far
+# narrower than the offset, and `_require_stream_separation` keeps it that way.
+_ACTION_STREAM_OFFSET = 50_000
+
+
+def _require_stream_separation(seeds: list[int]) -> None:
+    values = set(int(seed) for seed in seeds)
+    colliding = sorted(
+        seed for seed in values if seed + _ACTION_STREAM_OFFSET in values
+    )
+    if colliding:
+        raise ValueError(
+            "seed population reuses one episode's layout stream as another's "
+            f"action stream (offset {_ACTION_STREAM_OFFSET}): {colliding[:3]}"
+        )
+
+
+def _require_disjoint_seeds(
+    train_seeds: list[int], evaluation_seeds: list[int]
+) -> None:
+    """Refuse to fit and score on the same seeds.
+
+    The guard used to live only in the gated callers, so the core functions and
+    the CLI could be handed overlapping sets -- ``--train-seeds 101`` against
+    the default bases is enough.  Contamination is not subtle when it happens:
+    the review measured a position prior jumping from 0.044 to 0.243 top-1.
+    Development reports produced straight from here carried no such protection
+    (review finding F10).
+    """
+
+    validate_disjoint_seed_sets(
+        {"train": list(train_seeds), "evaluation": list(evaluation_seeds)}
+    )
+    _require_stream_separation(list(train_seeds) + list(evaluation_seeds))
 
 
 def _unblocked_others(
@@ -204,7 +248,7 @@ def _collect(
     agent_seed: int = 74_000,
 ) -> list[_Sample]:
     world = RandomizedOcclusionWorld(seed, hidden_turn_probability=turn_probability)
-    action_rng = np.random.default_rng(int(seed) + 50_000)
+    action_rng = np.random.default_rng(int(seed) + _ACTION_STREAM_OFFSET)
     agent = None
     if attach_entity_graph:
         from cal.model.entity_belief_graph import IntegratedBeliefAgentV2
@@ -979,6 +1023,7 @@ def run_benchmark(
 ) -> dict[str, object]:
     if not 0.0 <= turn_probability <= 1.0:
         raise ValueError("turn_probability must be in [0, 1]")
+    _require_disjoint_seeds(train_seeds, evaluation_seeds)
     evaluation_audit: Counter[str] = Counter()
     eval_samples = _collect_many(
         evaluation_seeds,
@@ -1223,6 +1268,7 @@ def gru_capacity_sweep(
 
     if not 0.0 <= turn_probability <= 1.0:
         raise ValueError("turn_probability must be in [0, 1]")
+    _require_disjoint_seeds(train_seeds, evaluation_seeds)
     train_samples = _collect_many(
         train_seeds, steps=steps, warmup=warmup, turn_probability=turn_probability
     )
@@ -1318,8 +1364,11 @@ def _development_audit_summary(report: dict[str, object]) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--steps", type=int, default=200)
-    parser.add_argument("--warmup", type=int, default=WARMUP)
+    # These three default to None rather than to their values so that
+    # "explicitly requested" is distinguishable from "not requested" -- a
+    # registry-bound run has to reject the former.
+    parser.add_argument("--steps", type=int)
+    parser.add_argument("--warmup", type=int)
     parser.add_argument("--turn-probability", type=float)
     parser.add_argument("--train-seeds", type=int, default=40)
     parser.add_argument("--eval-seeds", type=int, default=16)
@@ -1356,20 +1405,49 @@ def main() -> None:
             raise ValueError("only a development-only non-gated registry is accepted")
         if registry.get("model_metrics_read") is not False:
             raise ValueError("seed registry must attest model_metrics_read=false")
+        # A registry-bound report is stamped with that registry's selection
+        # digest, so every parameter the digest speaks for must come from the
+        # registry.  Previously these flags took effect *after* the registry
+        # was read and the report still wore the digest, which made the
+        # provenance a false claim (review finding F11).
+        overridden = [
+            name
+            for name, value in (
+                ("--steps", args.steps),
+                ("--warmup", args.warmup),
+                ("--turn-probability", args.turn_probability),
+            )
+            if value is not None
+        ]
+        if overridden:
+            raise ValueError(
+                "these are bound by the seed registry and cannot be overridden: "
+                + ", ".join(overridden)
+            )
+        contract = registry.get("coverage_contract")
+        if not isinstance(contract, dict):
+            raise ValueError("seed registry has no coverage contract")
+        # `.get(..., default)` on a split-critical parameter is how a registry
+        # that never bound a turn probability would silently be scored at a
+        # different one, so require the key instead.
+        if "selected_turn_probability" not in registry:
+            raise ValueError("seed registry does not bind a turn probability")
         train = [int(seed) for seed in registry["train_seeds"]]
         evaluation = [int(seed) for seed in registry["evaluation_seeds"]]
-        turn_probability = float(
-            registry.get("selected_turn_probability", _DEFAULT_TURN_PROBABILITY)
-        )
+        turn_probability = float(registry["selected_turn_probability"])
+        steps = int(contract["steps"])
+        warmup = int(contract["warmup"])
     else:
         train = [args.train_base + i for i in range(args.train_seeds)]
         evaluation = [args.eval_base + i for i in range(args.eval_seeds)]
-        turn_probability = _DEFAULT_TURN_PROBABILITY
-    if args.turn_probability is not None:
-        turn_probability = args.turn_probability
-    common = dict(
-        steps=args.steps, warmup=args.warmup, turn_probability=turn_probability
-    )
+        turn_probability = (
+            _DEFAULT_TURN_PROBABILITY
+            if args.turn_probability is None
+            else args.turn_probability
+        )
+        steps = 200 if args.steps is None else args.steps
+        warmup = WARMUP if args.warmup is None else args.warmup
+    common = dict(steps=steps, warmup=warmup, turn_probability=turn_probability)
     if args.sweep:
         report = gru_capacity_sweep(train, evaluation, **common)
     else:

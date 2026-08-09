@@ -8,6 +8,7 @@ import pytest
 
 from cal.evaluation.permanence_forward_benchmark import _successors
 from cal.evaluation.stochastic_permanence_kernel_diagnostic import (
+    EVALUATION_GRID_SPEC,
     PrivilegedUnprunedKinematicReference,
     _deep_size,
     _known_topology_kernel_alignment,
@@ -22,6 +23,13 @@ from cal.model.stochastic_motion_filter import (
     position_total_variation,
     probabilistic_bounce_distribution,
 )
+
+
+_POOL_GEOMETRY = {
+    "grid_size": EVALUATION_GRID_SPEC.grid_size,
+    "arena_low": EVALUATION_GRID_SPEC.arena_low,
+    "arena_high": EVALUATION_GRID_SPEC.arena_high,
+}
 
 
 def _static_map(cells: set[tuple[int, int]]) -> np.ndarray:
@@ -39,7 +47,7 @@ def test_known_topology_successors_match_privileged_world_kernel() -> None:
         _static_map(set(static)),
         turn_probability=0.35,
         allow_turn=True,
-        spec=GridSpec(),
+        spec=EVALUATION_GRID_SPEC,
     )
     world = _successors((13, 12), (1, 0), static, 0.35)
 
@@ -65,7 +73,7 @@ def test_probabilistic_bounce_marginalizes_unknown_forward_and_reflected_cells()
     static[12, 12] = 0.50
 
     distribution = probabilistic_bounce_distribution(
-        (13, 12), (1, 0), static, GridSpec()
+        (13, 12), (1, 0), static, EVALUATION_GRID_SPEC
     )
     probabilities = {
         (position, velocity): probability
@@ -84,7 +92,7 @@ def test_probabilistic_bounce_matches_explicit_static_map_mixture() -> None:
     candidate = {
         (position, velocity): probability
         for position, velocity, probability in probabilistic_bounce_distribution(
-            (13, 12), (1, 0), static_probability, GridSpec()
+            (13, 12), (1, 0), static_probability, EVALUATION_GRID_SPEC
         )
     }
     mixture: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
@@ -126,7 +134,7 @@ def test_known_topology_kernel_matches_world_exhaustively() -> None:
 
 def test_packed_filter_matches_unpruned_reference_without_pruning() -> None:
     exact = PrivilegedUnprunedKinematicReference()
-    packed = PackedKinematicFilter(k_max=512)
+    packed = PackedKinematicFilter(spec=EVALUATION_GRID_SPEC, k_max=512)
     exact.reset((13, 12), (1, 0))
     packed.reset((13, 12), (1, 0))
     static = _static_map({(10, 9), (10, 10), (15, 14)})
@@ -154,7 +162,7 @@ def test_packed_filter_matches_unpruned_reference_without_pruning() -> None:
 
 
 def test_pruned_mass_is_recorded_in_branch_evidence() -> None:
-    packed = PackedKinematicFilter(k_max=1)
+    packed = PackedKinematicFilter(spec=EVALUATION_GRID_SPEC, k_max=1)
     packed.reset((12, 12), (1, 0))
 
     result = packed.step(
@@ -171,7 +179,7 @@ def test_pruned_mass_is_recorded_in_branch_evidence() -> None:
 
 
 def test_propagation_overflow_does_not_partially_commit() -> None:
-    packed = PackedKinematicFilter(k_max=2)
+    packed = PackedKinematicFilter(spec=EVALUATION_GRID_SPEC, k_max=2)
     packed.reset((12, 12), (1, 0))
     packed._next_codes = np.zeros(1, dtype=np.uint16)
     packed._next_probability = np.zeros(1, dtype=np.float64)
@@ -199,7 +207,7 @@ def test_propagation_overflow_does_not_partially_commit() -> None:
 
 
 def test_invalid_probability_grid_fails_before_filter_commit() -> None:
-    packed = PackedKinematicFilter(k_max=4)
+    packed = PackedKinematicFilter(spec=EVALUATION_GRID_SPEC, k_max=4)
     packed.reset((12, 12), (1, 0))
     static = np.zeros((25, 25), dtype=np.float64)
     static[0, 0] = np.nan
@@ -229,7 +237,7 @@ def test_no_detection_updates_conditional_probability_and_existence_once() -> No
 
 
 def test_full_packed_pool_is_bounded_and_fully_detached() -> None:
-    pool = PackedPosteriorPool(k_max=96)
+    pool = PackedPosteriorPool(**_POOL_GEOMETRY, k_max=96)
     pool.fill_fully_detached()
 
     assert pool.s_max == 5 * 11 * 96
@@ -249,7 +257,7 @@ def test_full_packed_pool_is_bounded_and_fully_detached() -> None:
 
 
 def test_packed_pool_overflow_is_atomic() -> None:
-    pool = PackedPosteriorPool(k_max=48)
+    pool = PackedPosteriorPool(**_POOL_GEOMETRY, k_max=48)
     pool.fill_fully_detached()
     before = (pool.codes.copy(), pool.probability.copy(), pool.counts.copy())
 
@@ -267,7 +275,7 @@ def test_packed_pool_overflow_is_atomic() -> None:
 
 
 def test_packed_pool_factor_local_commit_preserves_other_factors() -> None:
-    pool = PackedPosteriorPool(k_max=96)
+    pool = PackedPosteriorPool(**_POOL_GEOMETRY, k_max=96)
     pool.fill_fully_detached()
     before_codes = pool.codes.copy()
     before_probability = pool.probability.copy()
@@ -309,3 +317,59 @@ def test_candidate_filter_source_has_no_evaluation_import() -> None:
             imported.append(node.module or "")
 
     assert not any(name.startswith("cal.evaluation") for name in imported)
+
+
+def test_turn_mixture_refuses_fractional_static_probability() -> None:
+    """The turn branch is an exact mixture only over a binary topology.
+
+    It weights each alternative direction by that direction's *marginal*
+    availability; under fractional occupancy those marginals are not the joint,
+    and a numeric probe measured an L1 deviation of 0.0231 against the exact
+    mixture (review finding F16).  Every caller feeds a binary grid today, but
+    the module reserves a learned `static_probability` slot, and the failure on
+    the day it is filled would be silent.
+    """
+
+    static = np.zeros((25, 25), dtype=np.float64)
+    static[12, 14] = 0.25
+
+    with pytest.raises(ValueError, match="binary static_probability"):
+        autonomous_successors(
+            (13, 12),
+            (1, 0),
+            static,
+            turn_probability=0.35,
+            allow_turn=True,
+            spec=EVALUATION_GRID_SPEC,
+        )
+
+    # The no-turn path marginalizes correctly and stays available.
+    assert probabilistic_bounce_distribution(
+        (13, 12), (1, 0), static, EVALUATION_GRID_SPEC
+    )
+
+
+def test_grid_spec_requires_explicit_geometry() -> None:
+    """Defaults copied from the evaluation world with no cross-check were how
+    an upstream arena change would silently turn live cells into walls
+    (review finding F17)."""
+
+    with pytest.raises(TypeError):
+        GridSpec()  # type: ignore[call-arg]
+
+
+def test_factor_replacement_rejects_a_repeated_state_code() -> None:
+    """A duplicate code splits one state's mass across two slots, so the
+    factor's marginal disagrees with itself (review finding F21)."""
+
+    pool = PackedPosteriorPool(**_POOL_GEOMETRY, k_max=8)
+    pool.fill_fully_detached()
+    code = int(pool.spec.encode((12, 12), (1, 0)))
+
+    with pytest.raises(ValueError, match="repeats a state code"):
+        pool.replace_factor_atomic(
+            0,
+            0,
+            np.array([code, code], dtype=np.uint16),
+            np.array([0.5, 0.5], dtype=np.float64),
+        )

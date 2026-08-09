@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import math
 from math import log
 from pathlib import Path
 import platform
@@ -23,16 +24,22 @@ from cal.evaluation.permanence_forward_benchmark import (
     _collect_many,
     _successors,
 )
-from cal.evaluation.stochastic_permanence_artifacts import source_lock
+from cal.evaluation.stochastic_permanence_artifacts import (
+    source_lock,
+    verify_locked_sources,
+)
 from cal.evaluation.stochastic_permanence_capacity_artifacts import (
     CAPACITY_ARTIFACT_SCHEMA_VERSION,
     write_capacity_artifact,
 )
 from cal.evaluation.permanence_seed_registry import coverage_contract
+from cal.evaluation.randomized_occlusion_world import GRID_SIZE
+from cal.evaluation.v2_i1_integration import ARENA_HIGH, ARENA_LOW
 from cal.evaluation.stochastic_permanence_custody import (
     validate_disjoint_seed_sets,
 )
 from cal.model.stochastic_motion_filter import (
+    MAX_SUCCESSORS_PER_STATE,
     EmptyPosteriorError,
     GridSpec,
     PackedKinematicFilter,
@@ -45,8 +52,17 @@ from cal.model.stochastic_motion_filter import (
 DEFAULT_REGISTRY = Path(
     "experiments/V2_P1_PERMANENCE_DEVELOPMENT_SEED_REGISTRY_V4.json"
 )
+# V6: regenerated after the 2026-08-09 correctness pass, which changed the
+# capacity artifact schema (3 -> 4) by replacing the always-true gates.
 DEFAULT_OUTPUT = Path(
-    "experiments/V2_I1_P1_PHASE_R_CAPACITY_CONFORMANCE_DEVELOPMENT_V5.json"
+    "experiments/V2_I1_P1_PHASE_R_CAPACITY_CONFORMANCE_DEVELOPMENT_V6.json"
+)
+# The one place the filter's arena is stated, derived from the world it is
+# scored against instead of repeated as a literal.  ``GridSpec`` deliberately
+# has no defaults, so an upstream arena change is now an import-time mismatch
+# rather than a filter that silently calls live cells certain walls.
+EVALUATION_GRID_SPEC = GridSpec(
+    grid_size=GRID_SIZE, arena_low=ARENA_LOW, arena_high=ARENA_HIGH
 )
 DEFAULT_K_MAX = 96
 # Selected by the turn-probability scan on registry V4, and independently
@@ -67,7 +83,7 @@ class PrivilegedUnprunedKinematicReference:
 
     privileged_diagnostic_only = True
 
-    def __init__(self, spec: GridSpec = GridSpec()) -> None:
+    def __init__(self, spec: GridSpec = EVALUATION_GRID_SPEC) -> None:
         self.spec = spec
         self._probability: dict[int, float] = {}
         self.branch_log_weight = 0.0
@@ -184,13 +200,14 @@ def _distribution_map(
 
 def _known_topology_kernel_alignment(
     *,
-    spec: GridSpec = GridSpec(),
+    spec: GridSpec = EVALUATION_GRID_SPEC,
 ) -> dict[str, float | int]:
     """Exhaustively compare the candidate kernel with the real local world kernel."""
 
     checked = 0
     maximum_l1 = 0.0
     support_mismatches = 0
+    maximum_successors = 0
     for y in range(spec.arena_low, spec.arena_high + 1):
         for x in range(spec.arena_low, spec.arena_high + 1):
             position = (x, y)
@@ -246,11 +263,20 @@ def _known_topology_kernel_alignment(
                             support_mismatches += int(
                                 candidate.keys() != world.keys()
                             )
+                            maximum_successors = max(
+                                maximum_successors, len(candidate)
+                            )
                             checked += 1
     return {
         "checked_transition_cases": checked,
         "support_mismatch_count": support_mismatches,
         "maximum_probability_l1": maximum_l1,
+        # The expansion workspace is sized `MAX_SUCCESSORS_PER_STATE * k_max`,
+        # and the gate on it used to compare that allocation against the same
+        # formula.  This sweep already enumerates every reachable local
+        # topology, so it can say what the real branching factor is and make
+        # the bound falsifiable (review finding F19).
+        "maximum_successors_per_state": maximum_successors,
     }
 
 
@@ -302,7 +328,7 @@ def _episode_conformance(
     turn_probability: float,
 ) -> dict[str, Any]:
     exact = PrivilegedUnprunedKinematicReference()
-    packed = PackedKinematicFilter(k_max)
+    packed = PackedKinematicFilter(k_max, spec=EVALUATION_GRID_SPEC)
     exact.reset(sample.last_seen, sample.observed_velocity)
     packed.reset(sample.last_seen, sample.observed_velocity)
     static_probability = _static_probability(sample)
@@ -311,7 +337,14 @@ def _episode_conformance(
     maximum_tv = 0.0
     maximum_reference_support = 1
     maximum_tv_checkpoint = 0
-    expected_packed_branch_log_weight = 0.0
+    # Accumulate the evidence term only.  The pruning term is taken at the end
+    # from `cumulative_retained_probability`, which the filter maintains as a
+    # separate running product.  Re-adding the filter's own reported
+    # `retained_probability` here -- as this did -- reconstructed
+    # `branch_log_weight` from exactly the numbers that built it, so the
+    # residual was identically zero and the gate could not fail (finding F19).
+    # Cross-checking the two independently maintained accumulators can.
+    observation_log_evidence = 0.0
     for hidden_index in range(sample.hidden_steps):
         exact_step = exact.step(
             static_probability=static_probability,
@@ -325,14 +358,16 @@ def _episode_conformance(
             turn_probability=turn_probability,
             allow_turn=hidden_index > 0,
         )
-        expected_packed_branch_log_weight += log(
+        observation_log_evidence += log(
             float(packed_step["observation_evidence"])
-        ) + log(float(packed_step["retained_probability"]))
+        )
         tv = position_total_variation(
             packed.position_marginal(), exact.position_marginal()
         )
-        maximum_tv = max(maximum_tv, tv)
-        if tv >= maximum_tv:
+        # `tv >= maximum_tv` after the max is always true, so this recorded the
+        # last step rather than the first step to reach the maximum (F21).
+        if tv > maximum_tv:
+            maximum_tv = tv
             maximum_tv_checkpoint = hidden_index + 1
         maximum_reference_support = max(
             maximum_reference_support, int(exact_step["support"])
@@ -346,6 +381,11 @@ def _episode_conformance(
                 ),
                 "packed_retained_support": int(
                     packed_step["retained_support"]
+                ),
+                # The reference drops zero-mass states, so this is the
+                # quantity actually comparable with `reference_support`.
+                "packed_retained_positive_support": int(
+                    packed_step["retained_positive_support"]
                 ),
                 "retained_probability": float(
                     packed_step["retained_probability"]
@@ -366,13 +406,16 @@ def _episode_conformance(
         "maximum_position_tv": maximum_tv,
         "maximum_position_tv_checkpoint": maximum_tv_checkpoint,
         "cumulative_pruned_mass": packed.cumulative_pruned_mass,
+        "maximum_step_pruned_mass": packed.maximum_step_pruned_mass,
         "packed_branch_log_weight": packed.branch_log_weight,
         "reference_branch_log_weight": exact.branch_log_weight,
         "branch_log_weight_gap": (
             exact.branch_log_weight - packed.branch_log_weight
         ),
         "packed_branch_accounting_residual": abs(
-            packed.branch_log_weight - expected_packed_branch_log_weight
+            packed.branch_log_weight
+            - observation_log_evidence
+            - log(packed.cumulative_retained_probability)
         ),
         "checkpoints": checkpoints,
     }
@@ -390,6 +433,9 @@ def run_phase_r_diagnostic(
         if workspace_root is not None
         else Path(__file__).resolve().parents[2]
     )
+    # See `run_phase0`: the lock is verified before any evidence is produced,
+    # not audited afterwards (review finding F8 / G7).
+    verify_locked_sources(root=root)
     registry_source = Path(registry_path)
     if not registry_source.is_absolute():
         registry_source = root / registry_source
@@ -437,9 +483,19 @@ def run_phase_r_diagnostic(
                     "error": f"{type(error).__name__}: {error}",
                 }
             )
-    pool = PackedPosteriorPool(k_max=k_max)
+    pool = PackedPosteriorPool(
+        k_max=k_max,
+        grid_size=EVALUATION_GRID_SPEC.grid_size,
+        arena_low=EVALUATION_GRID_SPEC.arena_low,
+        arena_high=EVALUATION_GRID_SPEC.arena_high,
+    )
     pool.fill_fully_detached()
     measured_deep_size = _deep_size(pool)
+    # What this diagnostic actually spent, so the research-budget gate can
+    # compare against the declared contract instead of against itself.  Phase R
+    # replays no training stream at all.
+    measured_steps_per_seed = int(registry["coverage_contract"]["steps"])
+    measured_train_replays = 0
     kernel_alignment = _known_topology_kernel_alignment()
     atomic_overflow_safe = _pool_atomic_overflow_safe(pool)
     maximum_cumulative = max(
@@ -518,6 +574,8 @@ def run_phase_r_diagnostic(
             "transition_checkpoint_count": sum(
                 len(item["checkpoints"]) for item in conformance
             ),
+            "measured_steps_per_seed": measured_steps_per_seed,
+            "measured_train_replays": measured_train_replays,
             **kernel_alignment,
         },
     }
@@ -539,6 +597,12 @@ def run_phase_r_diagnostic(
             pool.capacity_contract()["shared_expansion_workspace_size"]
             >= pool.capacity_contract()["shared_expansion_workspace_required"]
             and pool.capacity_contract()["direct_index_accumulator"]
+            # The two sizes above both descend from MAX_SUCCESSORS_PER_STATE,
+            # so on their own they only confirm the allocation matches its own
+            # formula.  This term is what makes the bound falsifiable: the
+            # exhaustive sweep says how many successors a state really has.
+            and kernel_alignment["maximum_successors_per_state"]
+            <= MAX_SUCCESSORS_PER_STATE
         ),
         "atomic_overflow_safe": atomic_overflow_safe,
         "declared_active_state": pool.active_state_bytes <= ACTIVE_STATE_LIMIT,
@@ -546,13 +610,27 @@ def run_phase_r_diagnostic(
         "learnable_parameters": pool.learnable_parameter_count
         <= PARAMETER_LIMIT,
         "mac_per_step": pool.estimated_mac_per_step <= MAC_LIMIT,
-        "registry_turn_probability": bool(
-            np.isclose(turn_probability, registry_turn_probability)
+        # The artifact validator compares these two at abs_tol 1e-12 and the
+        # gate used np.isclose's rtol 1e-5, so a run whose probability the
+        # registry does not bind could produce a gate the validator then
+        # refused to serialize -- an honest no-go that could not be written
+        # down (review finding F20).  One predicate now, the stricter one.
+        "registry_turn_probability": math.isclose(
+            turn_probability,
+            registry_turn_probability,
+            rel_tol=0.0,
+            abs_tol=1e-12,
         ),
-        "formal_research_budget_declared": bool(
+        # Declaring a budget is not respecting one.  The gate compared the
+        # module's own constants with the same literals in the same module and
+        # could not fail (review finding F19); it now also carries the
+        # measured work.
+        "formal_research_budget_respected": bool(
             FORMAL_STEPS_PER_SEED_LIMIT == 100_000
             and TRAIN_REPLAY_LIMIT == 4
             and CPU_TOTAL_SECONDS_LIMIT == 7_200
+            and measured_steps_per_seed <= FORMAL_STEPS_PER_SEED_LIMIT
+            and measured_train_replays <= TRAIN_REPLAY_LIMIT
         ),
     }
     return {

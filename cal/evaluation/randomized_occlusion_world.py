@@ -44,6 +44,11 @@ import numpy as np
 # seed-inverted (see the 2026-08-08 review, finding F9).
 DEFAULT_HIDDEN_STREAM_SALT = b"cal/v2-p1/permanence/hidden-stream/development"
 
+# The arena this world simulates in.  Named because anything that has to agree
+# with it -- notably the filter's ``GridSpec`` -- should import it rather than
+# repeat the literal (review finding F17).
+GRID_SIZE = 25
+
 
 def hidden_stream_key(seed: int, *, salt: bytes) -> int:
     """Derive the hidden-maneuver stream key from the episode seed via HMAC.
@@ -185,7 +190,7 @@ class RandomizedOcclusionWorld:
     def __init__(
         self,
         seed: int,
-        grid_size: int = 25,
+        grid_size: int = GRID_SIZE,
         *,
         hidden_turn_probability: float = 0.35,
         max_layout_attempts: int = 64,

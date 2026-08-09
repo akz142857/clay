@@ -338,10 +338,27 @@ non-gated artifacts are rebuilt with:
 ```bash
 uv run cal-v2-i1-permanence-phase0     # reference health and power design
 uv run cal-v2-i1-permanence-phase-r    # kernel capacity conformance
+uv run cal-v2-p1-permanence-controls   # V8 control constructability census
 ```
 
-Both currently record `phase0_go` / `phase_r_go`. **No candidate has been run
-through the confirmatory battery, and nothing here is frozen or gated.**
+Both artifacts currently record `phase0_go` / `phase_r_go`. **No candidate has
+been run through the confirmatory battery, and nothing here is frozen or
+gated.**
+
+The first two commands verify
+[`experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V1.json`](experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V1.json)
+before doing any work and refuse to run if any of the 22 locked permanence
+sources has changed, so evidence cannot be produced by edited code. Changing one
+of those files requires a new protocol version, not an in-place edit.
+
+The third is a non-gated feasibility census, not a scoreboard: it constructs all
+five V8 controls (`raw_sensor`, `assume_all_visible`, `time_shuffled`,
+`identity_scrambled`, `random_labels`) on the development split and reports how
+many events each can be built from. All five construct, but
+`identity_scrambled` is only constructible on **2,081 of 12,473** evaluation
+samples — it needs two simultaneously hidden tracked objects. That ratio is what
+stopped the V5 holdout part-way, and a consumed holdout cannot be retried, so
+any future holdout has to be sized against it.
 
 A preregistered review before freezing returned **`block`** on 2026-08-08. It
 confirmed the randomization works — position and raw-sensor probes collapse

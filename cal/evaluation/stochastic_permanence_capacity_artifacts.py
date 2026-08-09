@@ -15,6 +15,7 @@ import tempfile
 from typing import Any, Mapping
 
 from cal.evaluation.stochastic_permanence_artifacts import (
+    CAPACITY_ARTIFACT_SCHEMA_VERSION,
     _require_mapping,
     _require_nonnegative_int,
     _require_nonnegative_number,
@@ -25,7 +26,13 @@ from cal.evaluation.stochastic_permanence_artifacts import (
 )
 
 
-CAPACITY_ARTIFACT_SCHEMA_VERSION = 3
+# 4: the always-true gates were replaced with falsifiable ones (review finding
+# F19) and `formal_research_budget_declared` became
+# `formal_research_budget_respected`, so the gate key set and the recorded
+# diagnostic work both changed shape.  The validator strict-checks the schema
+# version, so V5 and earlier artifacts stay readable only as history.
+# Imported rather than restated: the other validator of this same artifact
+# reads the same constant.
 CAPACITY_ARTIFACT_KIND = "stochastic_permanence_capacity_conformance"
 
 
@@ -203,6 +210,10 @@ def validate_capacity_artifact(payload: Mapping[str, Any]) -> None:
     alignment_l1 = _require_nonnegative_number(
         alignment.get("maximum_probability_l1"), name="kernel alignment L1"
     )
+    maximum_successors = _require_nonnegative_int(
+        alignment.get("maximum_successors_per_state"),
+        name="maximum successors per state",
+    )
 
     resources = _require_mapping(payload.get("resources"), name="resources")
     resource_names = (
@@ -243,16 +254,35 @@ def validate_capacity_artifact(payload: Mapping[str, Any]) -> None:
         resources.get("formal_research_budget_contract"),
         name="formal research budget",
     )
-    research_ok = dict(research) == {
-        "steps_per_seed_maximum": 100_000,
-        "train_replay_maximum": 4,
-        "cpu_total_seconds_maximum": 7_200,
-    }
+    work = _require_mapping(
+        resources.get("deterministic_diagnostic_work"),
+        name="deterministic diagnostic work",
+    )
+    measured_steps_per_seed = _require_nonnegative_int(
+        work.get("measured_steps_per_seed"), name="measured steps per seed"
+    )
+    measured_train_replays = _require_nonnegative_int(
+        work.get("measured_train_replays"), name="measured train replays"
+    )
+    research_ok = (
+        dict(research)
+        == {
+            "steps_per_seed_maximum": 100_000,
+            "train_replay_maximum": 4,
+            "cpu_total_seconds_maximum": 7_200,
+        }
+        and measured_steps_per_seed <= 100_000
+        and measured_train_replays <= 4
+    )
 
     provenance = _require_mapping(payload.get("provenance"), name="provenance")
     registry_path = Path(str(provenance.get("registry_path", "")))
     registry_digest = provenance.get("registry_selection_digest_sha256")
     runtime = provenance.get("runtime")
+    registry_turn_probability = _require_nonnegative_number(
+        provenance.get("registry_turn_probability"),
+        name="registry turn probability",
+    )
     if (
         not registry_path.as_posix()
         or registry_path.is_absolute()
@@ -267,14 +297,18 @@ def validate_capacity_artifact(payload: Mapping[str, Any]) -> None:
             isinstance(runtime.get(name), str) and runtime[name]
             for name in ("python", "platform", "numpy")
         )
-        or not math.isclose(
-            float(provenance.get("registry_turn_probability", math.nan)),
-            turn_probability,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        )
     ):
         raise RuntimeError("capacity registry provenance mismatch")
+    # Whether the run used the probability the registry binds is a *gate*, not
+    # a structural property of the artifact.  Raising here meant a run at an
+    # unbound probability could not be written down at all -- the honest no-go
+    # died as "registry provenance mismatch" instead (review finding F20).
+    registry_turn_probability_matches = math.isclose(
+        registry_turn_probability,
+        turn_probability,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )
     _validate_source_lock_structure(provenance.get("source_lock"))
     source_files = _require_mapping(
         _require_mapping(
@@ -308,7 +342,10 @@ def validate_capacity_artifact(payload: Mapping[str, Any]) -> None:
             and alignment_l1 <= 1e-12
         ),
         "fully_detached_pool_safe": bool(contract["fully_detached_safe"]),
-        "shared_expansion_workspace_safe": True,
+        # The workspace *size* checks above are equalities against the same
+        # 12*k_max formula, so they cannot tell whether 12 is the right bound.
+        # The exhaustive sweep can (review finding F19).
+        "shared_expansion_workspace_safe": maximum_successors <= 12,
         "atomic_overflow_safe": True,
         "declared_active_state": resource["declared_active_state_bytes"]
         <= resource["active_state_limit_bytes"],
@@ -318,8 +355,8 @@ def validate_capacity_artifact(payload: Mapping[str, Any]) -> None:
         <= resource["parameter_limit"],
         "mac_per_step": resource["estimated_mac_per_step"]
         <= resource["mac_per_step_limit"],
-        "registry_turn_probability": True,
-        "formal_research_budget_declared": research_ok,
+        "registry_turn_probability": registry_turn_probability_matches,
+        "formal_research_budget_respected": research_ok,
     }
     gates = _require_mapping(payload.get("gates"), name="capacity gates")
     if dict(gates) != expected_gates:

@@ -51,3 +51,4 @@ results/*
 !results/V2-causal-sufficiency-summary.json
 !results/V2-diagnostic-ceiling-summary.json
 !results/V2-identifiability-summary.json
+!results/V2-P1-permanence-control-constructability-development.json

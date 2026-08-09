@@ -10,6 +10,15 @@ from time import perf_counter
 from typing import Any
 
 
+# Every schema this validator knows how to check.  It used to be the single
+# literal 1, which quietly made the validator unusable for the V8 language
+# readout at version 2 -- the only reachable outcome for a schema-2 artifact
+# was rejection, so there was no way to authorize one (review finding F15).
+# Adding a version here is a statement that the fields read below still mean
+# what they meant at version 1.
+SUPPORTED_RESULT_SCHEMA_VERSIONS = (1, 2)
+
+
 _GROUND_TRUTH_PARAMETER_SUBSTRINGS = (
     "mask",
     "label",
@@ -121,9 +130,12 @@ def require_authorization(
 ) -> dict[str, Any]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     name = payload.get("experiment", payload.get("audit"))
-    if payload.get("result_schema_version") != 1:
+    schema = payload.get("result_schema_version")
+    if schema not in SUPPORTED_RESULT_SCHEMA_VERSIONS:
         raise RuntimeError(
-            f"invalid {expected_name} V2 artifact schema: {path}"
+            f"invalid {expected_name} V2 artifact schema: {path} "
+            f"(got {schema!r}, supported "
+            f"{list(SUPPORTED_RESULT_SCHEMA_VERSIONS)})"
         )
     if name != expected_name:
         raise RuntimeError(f"expected {expected_name} prerequisite: {path}")

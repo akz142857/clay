@@ -21,7 +21,11 @@ from typing import Any, Iterable, Mapping
 #    `mean_at_least_development_floor` component, and the score table carries
 #    the `belief_free` reference (2026-08-08 review, F1/F5).
 ARTIFACT_SCHEMA_VERSION = 3
-CAPACITY_ARTIFACT_SCHEMA_VERSION = 2
+# Kept here, one layer below `stochastic_permanence_capacity_artifacts`, so the
+# two validators of the same artifact cannot disagree about which schema they
+# accept -- this copy had drifted to 2 while live artifacts were already at 3,
+# which quietly made `validate_artifact` unusable for the capacity kind.
+CAPACITY_ARTIFACT_SCHEMA_VERSION = 4
 POWER_SIMULATION_DESIGN_VERSION = (
     "outer_reference_bootstrap_variance_envelope_physical_null_v10"
 )
@@ -669,6 +673,10 @@ def _validate_capacity_artifact(payload: Mapping[str, Any]) -> None:
         or support_mismatches < 0
     ):
         raise RuntimeError("kernel alignment has invalid mismatch count")
+    maximum_successors = _require_nonnegative_int(
+        alignment.get("maximum_successors_per_state"),
+        name="kernel alignment maximum successors per state",
+    )
     alignment_l1 = _require_nonnegative_number(
         alignment.get("maximum_probability_l1"),
         name="kernel alignment maximum L1",
@@ -712,17 +720,32 @@ def _validate_capacity_artifact(payload: Mapping[str, Any]) -> None:
         resources.get("formal_research_budget_contract"),
         name="formal research budget",
     )
-    research_budget_declared = dict(research) == {
-        "steps_per_seed_maximum": 100_000,
-        "train_replay_maximum": 4,
-        "cpu_total_seconds_maximum": 7_200,
-    }
     deterministic_work = _require_mapping(
         resources.get("deterministic_diagnostic_work"),
         name="deterministic diagnostic work",
     )
     if "conformance_seconds" in deterministic_work:
         raise RuntimeError("canonical capacity artifact contains wall-clock timing")
+    measured_steps_per_seed = _require_nonnegative_int(
+        deterministic_work.get("measured_steps_per_seed"),
+        name="measured steps per seed",
+    )
+    measured_train_replays = _require_nonnegative_int(
+        deterministic_work.get("measured_train_replays"),
+        name="measured train replays",
+    )
+    # Declaring a budget and staying inside it are different claims, and only
+    # the first was ever gated (review finding F19).
+    research_budget_respected = (
+        dict(research)
+        == {
+            "steps_per_seed_maximum": 100_000,
+            "train_replay_maximum": 4,
+            "cpu_total_seconds_maximum": 7_200,
+        }
+        and measured_steps_per_seed <= 100_000
+        and measured_train_replays <= 4
+    )
 
     provenance = _require_mapping(payload.get("provenance"), name="provenance")
     for name in ("registry_path", "registry_selection_digest_sha256", "command"):
@@ -798,6 +821,10 @@ def _validate_capacity_artifact(payload: Mapping[str, Any]) -> None:
             contract["shared_expansion_workspace_size"]
             >= contract["shared_expansion_workspace_required"]
             and contract["direct_index_accumulator"]
+            # Both sizes above descend from the same 12*k_max formula; this is
+            # the term that can actually fail if 12 is not the real branching
+            # bound (review finding F19).
+            and maximum_successors <= 12
         ),
         "atomic_overflow_safe": bool(contract["atomic_overflow_probe_passed"]),
         "declared_active_state": resource_values["declared_active_state_bytes"]
@@ -811,7 +838,7 @@ def _validate_capacity_artifact(payload: Mapping[str, Any]) -> None:
         "mac_per_step": resource_values["estimated_mac_per_step"]
         <= resource_values["mac_per_step_limit"],
         "registry_turn_probability": registry_turn_probability_gate,
-        "formal_research_budget_declared": research_budget_declared,
+        "formal_research_budget_respected": research_budget_respected,
     }
     for name, expected in expected_gates.items():
         if gates.get(name) is not expected:
@@ -2068,3 +2095,190 @@ def verify_source_lock(lock: Mapping[str, Any], *, root: str | Path) -> None:
     rebuilt = source_lock((base / name for name in files), root=base)
     if dict(lock) != rebuilt:
         raise RuntimeError("source lock mismatch")
+
+
+# The frozen source lock for the permanence stack.  Until this existed, every
+# protocol in the repository carrying a `locked_source_sha256` was an M1-M3
+# confirmation protocol and the permanence count was zero (review findings F8 /
+# G7).  The artifacts already recorded a `source_lock`, and
+# `audit_artifact_source_lock` above can *detect* drift -- but detection is not
+# enforcement.  What was missing is the M1-M3 property: a runner that refuses
+# to execute at all once a locked source has changed, so a result produced by
+# edited code cannot come into existence in the first place.
+PERMANENCE_STACK_SOURCE_LOCK = Path(
+    "experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V1.json"
+)
+
+
+def permanence_stack_source_paths(root: str | Path) -> tuple[Path, ...]:
+    """Return every source file whose contents determine a gated permanence run.
+
+    This is the transitive import closure of the Phase-0, Phase-R, scan and
+    registry entry points, not a hand-kept list -- a hand-kept list is how
+    `locked_source_sha256` came to omit `v2_m3.py` for the M1-M3 stack (G4).
+    ``tests/test_stochastic_permanence_artifacts.py`` recomputes the closure and
+    fails if a new import escapes the lock.
+
+    ``cal/env/`` is deliberately absent: it is the M1/V1 world, and nothing in
+    this stack imports it.  The ground-truth simulators the permanence agents
+    are scored against are ``randomized_occlusion_world.py`` and
+    ``v2_i1_integration.py``, both of which are covered here.
+    """
+
+    base = Path(root).resolve()
+    names = (
+        "cal/evaluation/_permanence_belief_free_baseline.py",
+        "cal/evaluation/_permanence_gru_baseline.py",
+        "cal/evaluation/_permanence_slot_baseline.py",
+        "cal/evaluation/permanence_forward_benchmark.py",
+        "cal/evaluation/permanence_seed_registry.py",
+        "cal/evaluation/permanence_turn_probability_scan.py",
+        "cal/evaluation/randomized_occlusion_world.py",
+        "cal/evaluation/stochastic_permanence_artifacts.py",
+        "cal/evaluation/stochastic_permanence_benchmark.py",
+        "cal/evaluation/stochastic_permanence_capacity_artifacts.py",
+        "cal/evaluation/stochastic_permanence_custody.py",
+        "cal/evaluation/stochastic_permanence_kernel_diagnostic.py",
+        "cal/evaluation/stochastic_permanence_phase0.py",
+        "cal/evaluation/v2_artifacts.py",
+        "cal/evaluation/v2_i1_integration.py",
+        "cal/infra/provenance.py",
+        "cal/model/entity_belief_graph.py",
+        "cal/model/entity_graph.py",
+        "cal/model/integrated_agent.py",
+        "cal/model/motion_hypotheses.py",
+        "cal/model/occupancy.py",
+        "cal/model/stochastic_motion_filter.py",
+    )
+    return tuple(base / name for name in names)
+
+
+def build_permanence_stack_source_lock(
+    *, root: str | Path, protocol_version: str
+) -> dict[str, Any]:
+    """Build the protocol payload that pins the permanence stack."""
+
+    base = Path(root).resolve()
+    lock = source_lock(permanence_stack_source_paths(base), root=base)
+    return {
+        "protocol": "V2_P1_PERMANENCE_STACK_SOURCE_LOCK",
+        "protocol_version": protocol_version,
+        "status": "development_only_non_gated",
+        "scope": (
+            "transitive import closure of the Phase-0, Phase-R, "
+            "turn-probability-scan and seed-registry entry points"
+        ),
+        "enforcement": (
+            "cal.evaluation.stochastic_permanence_phase0.run_phase0 and "
+            "cal.evaluation.stochastic_permanence_kernel_diagnostic."
+            "run_phase_r_diagnostic call verify_locked_sources before doing "
+            "any work and raise on any drift"
+        ),
+        "out_of_scope": {
+            "cal/env/": (
+                "the M1/V1 world; unreachable from this stack. The ground "
+                "truth these agents are scored against is "
+                "randomized_occlusion_world.py and v2_i1_integration.py, "
+                "both locked."
+            )
+        },
+        "locked_source_sha256": dict(lock["files"]),
+        "combined_sha256": lock["combined_sha256"],
+        "file_count": lock["file_count"],
+        "algorithm": lock["algorithm"],
+    }
+
+
+def verify_locked_sources(
+    protocol_path: str | Path | None = None, *, root: str | Path
+) -> dict[str, Any]:
+    """Refuse to proceed if any locked permanence source has changed.
+
+    Unlike ``audit_artifact_source_lock``, which reports, this raises.  That
+    difference is the whole point: a development artifact's lock describes the
+    past and may legitimately drift, but a *frozen protocol* is a promise about
+    the code that is allowed to produce evidence right now.
+    """
+
+    base = Path(root).resolve()
+    path = Path(protocol_path) if protocol_path is not None else (
+        base / PERMANENCE_STACK_SOURCE_LOCK
+    )
+    if not path.is_absolute():
+        path = base / path
+    if not path.is_file():
+        raise RuntimeError(
+            f"permanence stack source lock is missing: {path}. Runs are "
+            f"blocked until the protocol is present."
+        )
+    raw = path.read_bytes()
+    sidecar = path.with_suffix(".sha256")
+    if not sidecar.is_file():
+        raise RuntimeError(f"source-lock protocol has no sidecar: {sidecar}")
+    recorded = sidecar.read_text(encoding="utf-8").split()[0]
+    if recorded != sha256_bytes(raw):
+        raise RuntimeError(f"source-lock protocol does not match its sidecar: {path}")
+
+    protocol = json.loads(raw)
+    locked = protocol.get("locked_source_sha256")
+    if not isinstance(locked, Mapping) or not locked:
+        raise RuntimeError(f"source-lock protocol pins no sources: {path}")
+
+    drifted: list[str] = []
+    missing: list[str] = []
+    for name, digest in sorted(locked.items()):
+        target = base / name
+        if not target.is_file():
+            missing.append(name)
+        elif sha256_path(target) != digest:
+            drifted.append(name)
+    # An unlocked new import is the same hole as a changed locked file: the run
+    # would depend on code the protocol never saw.
+    unlocked = sorted(
+        target.relative_to(base).as_posix()
+        for target in permanence_stack_source_paths(base)
+        if target.relative_to(base).as_posix() not in locked
+    )
+    if drifted or missing or unlocked:
+        raise RuntimeError(
+            "permanence stack source lock verification failed -- refusing to "
+            f"produce evidence. changed={drifted} missing={missing} "
+            f"unlocked={unlocked}. Amend the protocol to a new version if the "
+            f"change is intended."
+        )
+    return protocol
+
+
+def mint_permanence_stack_source_lock(
+    *, root: str | Path, protocol_version: str, overwrite: bool = False
+) -> str:
+    """Write the source-lock protocol and its sidecar; return the digest.
+
+    Minting is an amendment, not routine maintenance: it declares that the
+    current source state is the one allowed to produce evidence.  Bump
+    ``protocol_version`` and keep the superseded file, following the
+    `*_V2.json` / `amendment_record` convention the M1-M3 protocols use.
+    """
+
+    base = Path(root).resolve()
+    payload = build_permanence_stack_source_lock(
+        root=base, protocol_version=protocol_version
+    )
+    payload["reproduction_command"] = (
+        "uv run python -c \"from cal.evaluation."
+        "stochastic_permanence_artifacts import "
+        "mint_permanence_stack_source_lock as m; "
+        f"print(m(root='.', protocol_version='{protocol_version}'))\""
+    )
+    destination = base / (
+        "experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_"
+        f"{protocol_version}.json"
+    )
+    sidecar = destination.with_suffix(".sha256")
+    if not overwrite and (destination.exists() or sidecar.exists()):
+        raise FileExistsError(f"source-lock protocol already exists: {destination}")
+    raw = canonical_json_bytes(payload)
+    digest = sha256_bytes(raw)
+    destination.write_bytes(raw)
+    sidecar.write_text(f"{digest}  {destination.name}\n", encoding="utf-8")
+    return digest

@@ -343,7 +343,7 @@ validation / holdout seed **不在本仓库出现**，由保管人按 `holdout_p
 `docs/review/REVIEW_PLAN.md` §8，这些须经评审 `pass` 且由人类 Gatekeeper 签署
 后方可冻结。
 
-### C.9 冻结前仍未解决（2026-08-08 更新）
+### C.9 冻结前仍未解决（2026-08-09 更新）
 
 **已解决**
 
@@ -353,21 +353,59 @@ validation / holdout seed **不在本仓库出现**，由保管人按 `holdout_p
       overall/top1 +0.0513。Phase-R V5 同步通过 `phase_r_go`。
       **附带后果**：`recommended_holdout_seed_count` 由 2630 升至 **11078**——
       更强参照使效应量变小，确认阶段样本量随之上升，这决定未来一次性留出的规模。
+      **2026-08-09 已被 V12 / phase-R V6 取代**（`phase0_go` / `phase_r_go`
+      均维持）。**`recommended_holdout_seed_count` 仍为 11078，与 V11 一致**——
+      本轮的修正针对验证与记账，未移动效应量。详见
+      [完成报告](../review/REVIEW_PERMANENCE_FREEZE_COMPLETION_2026_08_09.md)。
+
+- [x] **永久性栈已有 source lock 且在运行时强制**（2026-08-09，评审 F8 / G7）。
+      新增冻结协议 `experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V1.json`
+      （+ `.sha256`），`locked_source_sha256` 覆盖 **22 个模块**——不是手工清单，
+      而是 Phase-0 / Phase-R / 扫描 / 注册表四个入口的**传递 import 闭包**
+      （M1–M3 的手工清单正是这样漏掉 `v2_m3.py` 的，见 G4）。
+      `run_phase0` 与 `run_phase_r_diagnostic` 在做任何工作**之前**调用
+      `verify_locked_sources`，任一锁定文件改动即抛异常拒绝产出证据。
+      **双向验证**：向 `stochastic_motion_filter.py` 追加一行注释后，
+      `cal-v2-i1-permanence-phase-r` 以
+      `refusing to produce evidence. changed=[...]` 拒绝运行；复原后恢复。
+      测试 `test_source_lock_covers_the_whole_permanence_import_closure` 重算闭包，
+      任何新 import 逃出锁即失败。
+      **`cal/env/` 不在范围内且是有意的**：那是 M1/V1 的世界，本栈不 import 它；
+      本栈的真值模拟器是 `randomized_occlusion_world.py` 与
+      `v2_i1_integration.py`，两者都已锁定。此事写入协议的 `out_of_scope` 字段。
+
+- [x] **对照可构造性已实证**（2026-08-09，评审 F6 后半条）。
+      `cal-v2-p1-permanence-controls` 在完整 development split
+      （40 train / 150 eval seed、12 473 个评估样本）上**实跑了全部五个 V8 对照的
+      构造代码**，五个全部构造成功，输出见
+      `results/V2-P1-permanence-control-constructability-development.json`。
+
+      | 对照 | 可构造样本 | top-1 | categorical NLL |
+      | --- | ---: | ---: | ---: |
+      | `raw_sensor` | 12 473 | 0.0520 | 5.253 |
+      | `assume_all_visible` | 12 473 | 0.0000 | 13.816 |
+      | `time_shuffled` | 12 473 | 0.1362 | 11.829 |
+      | `identity_scrambled` | **2 081** | 0.1802 | 11.279 |
+      | `random_labels` | 12 473 | 0.0461 | 6.627 |
+
+      **本条的要点是 `identity_scrambled` 那个 2 081**：身份打乱需要同时至少两个
+      被遮挡且轨迹已知的物体，只有 **16.7%** 的事件满足。V5 留出正是在这一点上
+      中途停止且不可重试——现在这个数字是在 development 上花零成本拿到的。
+      未来任何留出的规模都必须按该比例折算，否则同一失败会重演。
+      `assume_all_visible` 的 top-1 恰为 0.0000、NLL 恰为上限 13.816，
+      因为它把全部质量放在可见格上，而隐藏正例按定义全在不可见格——这是一个
+      干净可解释的对照，不是 bug。
 
 **仍然阻断冻结**
 
-- [ ] **永久性栈没有 source lock**（评审 F8 / G7）。实测：全库 7 份带
-      `locked_source_sha256` 的协议**全部是 M1–M3 确认协议，永久性相关为 0 份**。
-      现有的 `audit_artifact_source_lock` + 漂移测试只能**发现**改动，不能像
-      `_verify_locked_sources` 那样**阻止**用改过的代码跑出产物。第二阶段冻结
-      （C.7）必须补上运行时校验，否则冻结名不副实。
-- [ ] **对照可构造性未实证**（评审 F6 的后半条）。C.3 说明了 V8 对照因范式
-      变更而降级为非门控诊断，但评审要求的另一半——**在 development split 上
-      实跑一遍全部对照的构造代码并附输出**——尚未执行。V5 留出正是因为身份
-      打乱对照无法从留出事件中构造而中途停止且不可重试，这一条不能只靠论证。
-- [ ] 尚无候选实现，故 12 项确认门从未在真实候选上运行过。
-- [ ] `docs/experiments/V2_I1_STOCHASTIC_PERMANENCE_PLAN.md` 与本稿的
-      关系需明确：二者对同一门系统的描述必须合并或声明其一取代另一。
+- [ ] 尚无候选实现，故 12 项确认门从未在真实候选上运行过。当前只有
+      `oracle` / `belief_free` / `geometric` / `uniform` / `old_i1` 五个参照。
+
+- [x] **与 `V2_I1_STOCHASTIC_PERMANENCE_PLAN.md` 的关系已声明**（2026-08-09）：
+      该计划的 **§9「精确预注册门」整章被本 C 节取代**，其顶部已加注说明；
+      计划文档对**候选架构、权限边界、资源预研与实现顺序**（§4–§7、§10）仍是
+      唯一来源。分叉中最实质的一处是闭合门的下参照——计划 §9.3 用 `geometric`，
+      本节用 `belief_free`。红队攻击 A4 通过的正是前者，故这不是措辞差异。
 
 **待定夺（非阻断）**
 

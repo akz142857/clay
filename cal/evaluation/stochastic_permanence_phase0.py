@@ -28,6 +28,7 @@ from cal.evaluation.stochastic_permanence_artifacts import (
     POWER_LOCKED_DEVELOPMENT_SOURCE_COUNT,
     sha256_path,
     source_lock,
+    verify_locked_sources,
     write_canonical_artifact,
 )
 from cal.evaluation.stochastic_permanence_benchmark import (
@@ -45,8 +46,10 @@ from cal.evaluation.stochastic_permanence_custody import (
 DEFAULT_REGISTRY = Path(
     "experiments/V2_P1_PERMANENCE_DEVELOPMENT_SEED_REGISTRY_V4.json"
 )
+# V12: regenerated after the 2026-08-09 correctness pass over the permanence
+# stack (OPEN_ITEMS O5-O15).  V11 stays as the superseded link in the chain.
 DEFAULT_OUTPUT = Path(
-    "experiments/V2_I1_P1_PHASE0_REFERENCE_HEALTH_POWER_DEVELOPMENT_V11.json"
+    "experiments/V2_I1_P1_PHASE0_REFERENCE_HEALTH_POWER_DEVELOPMENT_V12.json"
 )
 
 
@@ -142,6 +145,10 @@ def run_phase0(
         if workspace_root is not None
         else Path(__file__).resolve().parents[2]
     )
+    # Before any work: the stack that is about to produce evidence must be the
+    # stack the protocol froze.  This is the enforcement half of the lock --
+    # the drift audit can only report after the fact (review finding F8 / G7).
+    verify_locked_sources(root=root)
     registry_source = Path(registry_path)
     if not registry_source.is_absolute():
         registry_source = root / registry_source
