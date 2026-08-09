@@ -83,7 +83,8 @@ run_candidate_lifecycle(factory, *, train_sensor_streams,
 | **I3** ✅ | M3 branch-local self + 联合边缘化 | 单实体 marginal 等于 `π·P_action+(1-π)·P_auto`；多实体时至多一个 self 响应 action。**已完成**：`cal/model/branch_self_identity.py`。`{null} ∪ entities` 的**类别分布**在构造上同时排除了两种被禁设计；联合式一并给出，**因为独立 Bernoulli 设计在每个单实体边缘上都与正确模型一致、只在联合上分叉**——只查边缘的测试会给错误实现放行 |
 | **I4** ✅ | M4 + M5，产出可被 `run_candidate_lifecycle` 接受的 factory | `validate_candidate_factory` 通过；每 episode 新实例；frozen kernel 未被改动。**已完成**：`cal/model/permanence_candidate.py`。**两个发现**：(1) `_maybe_hidden_turn` 在实体可见时直接返回，**转向只在遮挡期发生**，所以转向概率无法从可见轨迹估计，只能从"消失—再现"间隔做极大似然；(2) 撞上了本轮自己加的 F16 守卫，按**方案 2** 处理——见下 |
 | **I4b** ✅ | 多假设关联 bank（`w_h` 不止一条 branch） | §5.6 要求保留假设 bank。**已完成**：`cal/model/association_bank.py`。关联不确定性只存在于 `w_h`，不再有第二个每轨道关联标量；每条 branch 强制**一对一**指派；两个界（假设数、每父节点子节点数）以 `discarded_hypothesis_mass` 审计而非伪装成穷举。**验证了"候选在锁外"这条结构结论——整个 I4b 未触发任何协议改动** |
-| **I5** | 在 development split 上跑通并与既有五个参照同表比较 | 产出 development 报告；**此时才第一次知道 12 个确认门在真实候选上的表现** |
+| **I5** ◐ | 在 development split 上跑通并与既有五个参照同表比较 | 产出 development 报告；**此时才第一次知道 12 个确认门在真实候选上的表现**。**框架与诊断已完成**：`cal/evaluation/permanence_candidate_development.py`，重放与采集器逐样本对齐已验证（297/297，0 失配）。**全量未跑**（约 4.3 小时）。**先做 I5a** |
+| **I5a** | 改进跟踪 | 特权诊断已定位：sensor-only 候选 0.2391 vs 白送轨迹 0.4460，**差距几乎全在跟踪**。信念侧 6+ 闭合已达 0.727（下限 0.40），改信念滤波器基本是白费 |
 
 **I5 之前不得声称任何门控结论。** 开发集上的数字是开发数字，不是确认证据。
 
