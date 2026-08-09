@@ -49,7 +49,11 @@ from cal.model.branch_self_identity import (
     BranchSelfIdentity,
     action_successors,
 )
-from cal.model.association_bank import BankKernel, GlobalAssociationBank
+from cal.model.association_bank import (
+    BankKernel,
+    GlobalAssociationBank,
+    as_probability_field,
+)
 from cal.model.permanence_track import TrackKernel
 from cal.model.sensor_only_static_map import (
     SensorOnlyStaticMap,
@@ -222,7 +226,9 @@ class StochasticPermanenceCandidate:
         """``P_occ(c) = 1 - (1 - m_t(c))·(1 - P_dynamic(c))`` over the grid."""
 
         static = self._static.probabilities()
-        return 1.0 - (1.0 - static) * (1.0 - self.hidden_occupancy())
+        return as_probability_field(
+            1.0 - (1.0 - static) * (1.0 - self.hidden_occupancy())
+        )
 
     def hidden_occupancy(self) -> np.ndarray:
         """``Σ_h w_h·[1 - Π_i(1 - e_hi·q_hi)]`` -- what permanence is scored on."""

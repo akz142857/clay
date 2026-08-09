@@ -176,3 +176,46 @@ def test_track_positions_come_from_the_most_likely_branch() -> None:
     assert list(positions) == sorted(positions)
     best = bank.most_likely()
     assert len(positions) <= len(best.tracks)
+
+
+def test_rounding_is_clipped_but_real_error_is_refused() -> None:
+    """The union is analytically in [0, 1]; only representation error is
+    forgiven.
+
+    Silently clipping a genuinely out-of-range field would turn a broken
+    posterior into a plausible-looking one, which is the failure mode this
+    guard exists to avoid rather than create.
+    """
+
+    from cal.model.association_bank import as_probability_field
+
+    one_ulp = np.asarray([1.0 + 2.220446049250313e-16])
+    assert as_probability_field(one_ulp) == pytest.approx(1.0)
+    assert as_probability_field(np.asarray([-1e-17])) == pytest.approx(0.0)
+
+    with pytest.raises(ValueError, match="too large to be rounding"):
+        as_probability_field(np.asarray([1.3]))
+    with pytest.raises(ValueError, match="too large to be rounding"):
+        as_probability_field(np.asarray([-0.2]))
+
+
+def test_a_newborn_track_does_not_invent_a_direction() -> None:
+    """One detection fixes position and says nothing about heading.
+
+    Committing to a direction anyway costs most exactly where permanence is
+    measured, because the first hidden steps get propagated somewhere nobody
+    observed.
+    """
+
+    bank = _bank()
+    _step(bank, [(12, 12)], allow_turn=False)
+
+    track = bank.most_likely().tracks[0]
+    states = track.predicted_states(
+        static_probability=np.zeros((_GRID, _GRID), dtype=np.float64),
+        turn_probability=0.45,
+        allow_turn=False,
+    )
+    reached = {position for position, _velocity in states}
+    # A uniform velocity prior reaches all four neighbours, not one.
+    assert len(reached) == 4

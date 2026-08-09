@@ -94,14 +94,42 @@ class AssociationHypothesis:
         for track in self.tracks:
             for (x, y), mass in track.occupancy().items():
                 free[y, x] *= 1.0 - min(max(mass, 0.0), 1.0)
-        return 1.0 - free
+        return as_probability_field(1.0 - free)
 
 
-def _velocity_from(previous: _Cell | None, current: _Cell) -> _Velocity:
+# The Bernoulli union is analytically inside [0, 1]; accumulating
+# `1 - Π(1 - p)` in floating point can land one ULP outside it.  Clipping that
+# away restores an invariant the formula already guarantees -- but only that
+# much.  A larger excess is a modelling error, and silently clipping it would
+# turn a broken posterior into a plausible-looking one.
+_PROBABILITY_ROUNDING_SLACK = 1e-9
+
+
+def as_probability_field(values: np.ndarray) -> np.ndarray:
+    """Clip representation error off a probability field; refuse real error."""
+
+    array = np.asarray(values, dtype=np.float64)
+    excess = float(max(array.max() - 1.0, -array.min(), 0.0))
+    if excess > _PROBABILITY_ROUNDING_SLACK:
+        raise ValueError(
+            f"occupancy field leaves [0, 1] by {excess:.3g}, which is too "
+            f"large to be rounding"
+        )
+    return np.clip(array, 0.0, 1.0)
+
+
+def _velocity_from(previous: _Cell | None, current: _Cell) -> _Velocity | None:
+    """Observed velocity, or ``None`` when the displacement does not reveal one.
+
+    ``None`` is not a failure case to paper over with a default direction: it
+    is the honest state after a single detection, and the caller answers it
+    with a uniform prior instead of an assertion.
+    """
+
     if previous is None:
-        return (1, 0)
+        return None
     delta = (current[0] - previous[0], current[1] - previous[1])
-    return delta if delta in _UNIT_VELOCITIES else (1, 0)
+    return delta if delta in _UNIT_VELOCITIES else None
 
 
 class GlobalAssociationBank:
@@ -326,7 +354,11 @@ class GlobalAssociationBank:
                 ratios.append(
                     self_likelihood_ratio(previous, cell, static_probability, action)
                 )
-                track.reset(cell, _velocity_from(previous, cell))
+                velocity = _velocity_from(previous, cell)
+                if velocity is None:
+                    track.reset_unknown_velocity(cell)
+                else:
+                    track.reset(cell, velocity)
                 child.tracks.append(track)
                 child.last_positions.append(cell)
                 continue
@@ -356,7 +388,8 @@ class GlobalAssociationBank:
             )
             # e = 1 in the birth branch: the branch prior already carries the
             # birth intensity, so an existence boost would count it twice.
-            track.reset(cell, (1, 0))
+            # Velocity is unobserved at birth, so it stays a uniform prior.
+            track.reset_unknown_velocity(cell)
             child.tracks.append(track)
             child.last_positions.append(cell)
             ratios.append(1.0)
@@ -407,7 +440,7 @@ class GlobalAssociationBank:
         total = np.zeros((self.spec.grid_size, self.spec.grid_size), dtype=np.float64)
         for weight, hypothesis in zip(weights, self.hypotheses):
             total += weight * hypothesis.occupancy(self.spec.grid_size)
-        return total
+        return as_probability_field(total)
 
     def most_likely(self) -> AssociationHypothesis:
         weights = self.weights()

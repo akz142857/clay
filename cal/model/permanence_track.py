@@ -40,6 +40,7 @@ from cal.model.stochastic_motion_filter import (
     EmptyPosteriorError,
     GridSpec,
     PackedKinematicFilter,
+    UNIT_VELOCITIES,
     autonomous_successors,
 )
 
@@ -106,6 +107,38 @@ class PermanenceTrack:
         if not 0.0 < existence <= 1.0:
             raise ValueError("initial existence must be in (0, 1]")
         self._filter.reset(position, velocity)
+        self.existence = float(existence)
+        self.branch_log_weight = 0.0
+
+    def reset_unknown_velocity(
+        self, position: tuple[int, int], *, existence: float = 1.0
+    ) -> None:
+        """Start a track whose velocity has not been observed yet.
+
+        A single detection fixes where an entity is and says nothing about
+        where it is going.  Committing to one direction anyway is not a
+        neutral default -- it is an unsupported assertion that costs most
+        exactly where permanence is measured, because the first few hidden
+        steps are propagated in a direction nobody observed.  A uniform prior
+        over the four unit velocities is what the observation actually
+        licenses.
+        """
+
+        if not 0.0 < existence <= 1.0:
+            raise ValueError("initial existence must be in (0, 1]")
+        spec = self._filter.spec
+        codes = [spec.encode(position, velocity) for velocity in UNIT_VELOCITIES]
+        if len(codes) > self._filter.k_max:
+            raise ValueError("k_max cannot hold a uniform velocity prior")
+        self._filter.codes.fill(0)
+        self._filter.probability.fill(0.0)
+        for index, code in enumerate(sorted(codes)):
+            self._filter.codes[index] = code
+            self._filter.probability[index] = 1.0 / len(codes)
+        self._filter.count = len(codes)
+        self._filter.branch_log_weight = 0.0
+        self._filter.cumulative_retained_probability = 1.0
+        self._filter.maximum_step_pruned_mass = 0.0
         self.existence = float(existence)
         self.branch_log_weight = 0.0
 
