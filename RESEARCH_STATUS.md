@@ -87,6 +87,18 @@ capacity and statistical-power checks — **not** evidence that a permanence
 mechanism was learned. No candidate has been evaluated against a holdout, and
 no holdout has been created.
 
+A correctness pass on 2026-08-09 closed the review's non-mechanism findings and
+two of its four freeze blockers. The permanence stack now has a frozen source
+lock over the 22-module import closure that the Phase-0 and Phase-R runners
+verify before producing anything, so a changed source stops the run rather than
+being noticed afterwards; and all five V8 controls were constructed on the
+development split, which put a number on the constraint that stopped V5 —
+`identity_scrambled` is buildable from only 2,081 of 12,473 evaluation samples.
+Four always-true capacity gates were replaced with falsifiable ones. **This does
+not move the program toward passing**: the remaining blocker is that no
+candidate exists, so the twelve confirmatory gates have still never run against
+one. See [`docs/review/OPEN_ITEMS.md`](docs/review/OPEN_ITEMS.md).
+
 ## Claims this repository does not make
 
 Cal is not currently:

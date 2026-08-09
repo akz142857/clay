@@ -10,6 +10,11 @@ from typing import Any
 import pytest
 
 import cal.evaluation.stochastic_permanence_custody as custody
+from cal.evaluation.randomized_occlusion_world import (
+    DEFAULT_HIDDEN_STREAM_SALT,
+    RandomizedOcclusionWorld,
+    hidden_stream_key,
+)
 from cal.evaluation.stochastic_permanence_artifacts import (
     canonical_json_bytes,
     sha256_bytes,
@@ -500,3 +505,64 @@ def test_cas_cleans_local_tag_when_post_push_verification_is_ambiguous(
         capture_output=True,
     )
     assert local_ref.returncode != 0
+
+
+# The one custody obligation that cannot be discharged after the fact: a split
+# keyed by the published salt is seed-invertible from the moment its episodes
+# exist, and re-keying produces a *different* split rather than repairing that
+# one (review finding F9, open item O19).
+_SECRET_SALT = bytes(range(custody.MINIMUM_CUSTODIAN_SALT_BYTES))
+
+
+def test_published_development_salt_cannot_key_a_reserved_split() -> None:
+    with pytest.raises(custody.InvertibleSplitError, match="published development"):
+        custody.require_custodian_salt(DEFAULT_HIDDEN_STREAM_SALT)
+
+
+@pytest.mark.parametrize(
+    "salt, expected",
+    [
+        (b"", "at least"),
+        (b"too-short", "at least"),
+        (b"\x00" * custody.MINIMUM_CUSTODIAN_SALT_BYTES, "single repeated byte"),
+        ("a string, not bytes", "must be bytes"),
+    ],
+)
+def test_placeholder_salts_cannot_key_a_reserved_split(
+    salt: object, expected: str
+) -> None:
+    with pytest.raises(custody.InvertibleSplitError, match=expected):
+        custody.require_custodian_salt(salt)  # type: ignore[arg-type]
+
+
+def test_a_real_secret_passes_through_unchanged() -> None:
+    assert custody.require_custodian_salt(_SECRET_SALT) == _SECRET_SALT
+    assert custody.require_custodian_salt(bytearray(_SECRET_SALT)) == _SECRET_SALT
+
+
+def test_the_constructor_default_is_the_trap_this_closes() -> None:
+    """Omitting the salt must fail here, where the constructor would not.
+
+    ``RandomizedOcclusionWorld`` defaults to the published salt so development
+    stays reproducible; a generation script that forgot the argument would get
+    an invertible split with no error at all.  Both halves are pinned, so that
+    dropping the default later does not silently make this test vacuous.
+    """
+
+    assert RandomizedOcclusionWorld(62003).grid_size == 25
+
+    with pytest.raises(TypeError):
+        custody.open_reserved_split_world(62003)  # type: ignore[call-arg]
+    with pytest.raises(custody.InvertibleSplitError):
+        custody.open_reserved_split_world(
+            62003, custodian_salt=DEFAULT_HIDDEN_STREAM_SALT
+        )
+
+
+def test_a_salted_split_world_keys_a_different_hidden_stream() -> None:
+    world = custody.open_reserved_split_world(62003, custodian_salt=_SECRET_SALT)
+
+    assert world.grid_size == 25
+    assert hidden_stream_key(62003, salt=_SECRET_SALT) != hidden_stream_key(
+        62003, salt=DEFAULT_HIDDEN_STREAM_SALT
+    )

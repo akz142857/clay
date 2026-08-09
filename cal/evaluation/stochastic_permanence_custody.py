@@ -3,6 +3,13 @@
 This module implements the state machine, atomic local reservation, shared
 expected-missing Git-tag CAS, and immutable Git-blob result evidence.  It never
 generates, serializes into public certificates, or prints a secret manifest.
+
+It also holds the one custody obligation that cannot be discharged after the
+fact: ``require_custodian_salt`` refuses to key a reserved split with a salt
+anyone holding the repository could guess.  Everything else here governs what
+may be *consumed*; that one governs what may be *generated*, because by the
+time the episodes exist the salt is already baked into every hidden trajectory
+they contain.
 """
 
 from __future__ import annotations
@@ -16,6 +23,10 @@ import subprocess
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
+from cal.evaluation.randomized_occlusion_world import (
+    DEFAULT_HIDDEN_STREAM_SALT,
+    RandomizedOcclusionWorld,
+)
 from cal.evaluation.stochastic_permanence_artifacts import (
     canonical_json_bytes,
     sha256_bytes,
@@ -69,6 +80,85 @@ _HEX = frozenset("0123456789abcdef")
 _REMOTE_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
 )
+
+# Salts readable by anyone holding the repository.  A one-shot split keyed by
+# one of these is seed-invertible by construction.
+PUBLISHED_SALTS: frozenset[bytes] = frozenset({DEFAULT_HIDDEN_STREAM_SALT})
+
+# A salt shorter than this is the shape a hand-typed placeholder takes, and is
+# searchable regardless of how it was chosen.
+MINIMUM_CUSTODIAN_SALT_BYTES = 32
+
+
+class InvertibleSplitError(RuntimeError):
+    """Raised when a one-shot split would be keyed by a guessable salt."""
+
+
+def require_custodian_salt(salt: bytes) -> bytes:
+    """Return ``salt`` if it can key a one-shot split, else refuse.
+
+    Custody is fail-closed about what may be *consumed*; this is the matching
+    precondition on what may be *generated*, and it is the one obligation in
+    this module that cannot be discharged after the fact.
+
+    The visible layout of an episode is a deterministic function of its seed,
+    while the hidden maneuvers the permanence task is about come from a
+    separate stream.  When that stream was keyed by a published rule
+    (``seed + 90_000``), an observer could read the layout off the first frame,
+    recover the seed and replay the hidden trajectory exactly -- the 2026-08-08
+    red team did, 10/10 over 200 steps (finding F9).  ``HMAC(salt, seed)``
+    breaks the link, but only while the salt is secret.
+
+    ``DEFAULT_HIDDEN_STREAM_SALT`` is published on purpose: development and
+    calibration episodes must stay reproducible and auditable, and they are not
+    one-shot.  A reserved split is.  **A split keyed by the published salt is
+    invertible from the moment it exists, and no later change repairs it** --
+    re-keying does not re-secure those episodes, it produces different ones,
+    and under one-shot semantics the first batch is already spent.  Hence a
+    precondition rather than a check.
+    """
+
+    if not isinstance(salt, (bytes, bytearray)):
+        raise InvertibleSplitError(
+            "custodian salt must be bytes held outside the repository"
+        )
+    material = bytes(salt)
+    if material in PUBLISHED_SALTS:
+        raise InvertibleSplitError(
+            "refusing to key a one-shot split with the published development "
+            "salt: the split would be seed-invertible from the moment it "
+            "exists, and regenerating under a secret salt yields a different "
+            "split rather than repairing this one (review finding F9)"
+        )
+    if len(material) < MINIMUM_CUSTODIAN_SALT_BYTES:
+        raise InvertibleSplitError(
+            f"custodian salt is {len(material)} bytes; at least "
+            f"{MINIMUM_CUSTODIAN_SALT_BYTES} are required so the salt is not "
+            f"searchable"
+        )
+    if len(set(material)) == 1:
+        raise InvertibleSplitError(
+            "custodian salt is a single repeated byte, which is a placeholder "
+            "rather than a secret"
+        )
+    return material
+
+
+def open_reserved_split_world(
+    seed: int, *, custodian_salt: bytes, **kwargs: Any
+) -> RandomizedOcclusionWorld:
+    """Build an episode for a reserved split, refusing a guessable salt.
+
+    ``RandomizedOcclusionWorld`` defaults ``hidden_stream_salt`` to the
+    published value so development stays reproducible.  That default is the
+    trap this closes: omitting the argument in a generation script raises
+    nothing, it silently produces an invertible split.  Generation goes through
+    here instead of through the constructor.
+    """
+
+    return RandomizedOcclusionWorld(
+        seed, hidden_stream_salt=require_custodian_salt(custodian_salt), **kwargs
+    )
 
 
 def _require_sha256(value: Any, name: str) -> str:

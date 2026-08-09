@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -8,12 +10,15 @@ import pytest
 
 from cal.evaluation.stochastic_permanence_artifacts import (
     CAPACITY_ARTIFACT_SCHEMA_VERSION,
+    PERMANENCE_STACK_SOURCE_LOCK,
     audit_artifact_source_lock,
     exact_binomial_lower_bound,
     exact_binomial_upper_bound,
     load_canonical_artifact,
+    permanence_stack_source_paths,
     source_lock,
     validate_artifact,
+    verify_locked_sources,
     verify_source_lock,
     write_canonical_artifact,
 )
@@ -36,7 +41,7 @@ def test_exact_binomial_bounds_support_simultaneous_tail_probabilities() -> None
 def test_phase0_schema_recomputes_moments_distribution_and_recommendation() -> None:
     path = (
         Path(__file__).resolve().parents[1]
-        / "experiments/V2_I1_P1_PHASE0_REFERENCE_HEALTH_POWER_DEVELOPMENT_V11.json"
+        / "experiments/V2_I1_P1_PHASE0_REFERENCE_HEALTH_POWER_DEVELOPMENT_V12.json"
     )
     payload, _digest = load_canonical_artifact(
         path,
@@ -84,10 +89,10 @@ def test_phase0_schema_recomputes_moments_distribution_and_recommendation() -> N
     assert simulation["recommended_holdout_seed_count"] == 11078
 
 
-def test_phase_r_v3_schema_locks_factor_local_capacity_evidence() -> None:
+def test_phase_r_schema_locks_factor_local_capacity_evidence() -> None:
     path = (
         Path(__file__).resolve().parents[1]
-        / "experiments/V2_I1_P1_PHASE_R_CAPACITY_CONFORMANCE_DEVELOPMENT_V5.json"
+        / "experiments/V2_I1_P1_PHASE_R_CAPACITY_CONFORMANCE_DEVELOPMENT_V6.json"
     )
     payload, _digest = load_capacity_artifact(path)
 
@@ -214,6 +219,7 @@ def _capacity_payload() -> dict[str, object]:
                 "checked_transition_cases": 1,
                 "support_mismatch_count": 0,
                 "maximum_probability_l1": 0.0,
+                "maximum_successors_per_state": 3,
             },
             "errors": [],
             "episodes": [{}],
@@ -238,6 +244,8 @@ def _capacity_payload() -> dict[str, object]:
             "deterministic_diagnostic_work": {
                 "episode_count": 1,
                 "transition_checkpoint_count": 1,
+                "measured_steps_per_seed": 200,
+                "measured_train_replays": 0,
             },
         },
         "gates": {
@@ -255,7 +263,7 @@ def _capacity_payload() -> dict[str, object]:
             "learnable_parameters": True,
             "mac_per_step": True,
             "registry_turn_probability": True,
-            "formal_research_budget_declared": True,
+            "formal_research_budget_respected": True,
         },
         "passed": True,
         "decision": "phase_r_go",
@@ -429,13 +437,15 @@ def test_source_lock_is_portable_and_fail_closed(tmp_path: Path) -> None:
 # call `run_benchmark` at all, so no gate value in either artifact depends on
 # it.  Regenerating a four-hour artifact to absorb a diagnostic is not worth
 # it; the drift is recorded instead.
-ACKNOWLEDGED_SOURCE_DRIFT = frozenset(
-    {"cal/evaluation/permanence_forward_benchmark.py"}
-)
+# Empty, and it should stay that way.  Drift here is a licence for an
+# artifact's source-lock claim to be false; the V12/V6 regeneration was what
+# discharged the previous entry.  Adding a name is a decision to publish an
+# artifact that no longer matches the code that produced it.
+ACKNOWLEDGED_SOURCE_DRIFT: frozenset[str] = frozenset()
 
 CURRENT_DEVELOPMENT_ARTIFACTS = (
-    "V2_I1_P1_PHASE0_REFERENCE_HEALTH_POWER_DEVELOPMENT_V11.json",
-    "V2_I1_P1_PHASE_R_CAPACITY_CONFORMANCE_DEVELOPMENT_V5.json",
+    "V2_I1_P1_PHASE0_REFERENCE_HEALTH_POWER_DEVELOPMENT_V12.json",
+    "V2_I1_P1_PHASE_R_CAPACITY_CONFORMANCE_DEVELOPMENT_V6.json",
 )
 
 
@@ -485,3 +495,112 @@ def test_source_lock_audit_reports_drift_without_raising(tmp_path: Path) -> None
     module.unlink()
     removed = audit_artifact_source_lock(artifact, root=tmp_path)
     assert removed["missing"] == ["pkg/mod.py"]
+
+
+PERMANENCE_ENTRY_POINTS = (
+    "cal.evaluation.stochastic_permanence_phase0",
+    "cal.evaluation.stochastic_permanence_kernel_diagnostic",
+    "cal.evaluation.permanence_turn_probability_scan",
+    "cal.evaluation.permanence_seed_registry",
+)
+
+
+def _cal_imports(path: Path) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom):
+            if node.module and node.module.startswith("cal."):
+                modules.add(node.module)
+        elif isinstance(node, ast.Import):
+            modules.update(
+                alias.name for alias in node.names if alias.name.startswith("cal.")
+            )
+    return modules
+
+
+def _import_closure(root: Path) -> set[str]:
+    """Every `cal` module reachable from the permanence entry points."""
+
+    reached: set[str] = set()
+    pending = list(PERMANENCE_ENTRY_POINTS)
+    while pending:
+        module = pending.pop()
+        if module in reached:
+            continue
+        path = root / (module.replace(".", "/") + ".py")
+        if not path.is_file():
+            continue
+        reached.add(module)
+        pending.extend(_cal_imports(path))
+    return {module.replace(".", "/") + ".py" for module in reached}
+
+
+def test_source_lock_covers_the_whole_permanence_import_closure() -> None:
+    """A new import must not be able to slip outside the lock.
+
+    The M1-M3 lock is a hand-kept list and it omits `v2_m3.py`, which
+    `v2_m3_hypotheses.py` imports `_arm`/`_rasterize` from -- so changes there
+    go undetected everywhere (review gap G4).  This recomputes the closure so
+    the same omission cannot happen here silently.
+    """
+
+    root = Path(__file__).resolve().parents[1]
+    locked = {
+        path.relative_to(root).as_posix()
+        for path in permanence_stack_source_paths(root)
+    }
+    closure = _import_closure(root)
+
+    assert not (closure - locked), (
+        "these modules affect gated permanence evidence but are outside the "
+        f"source lock: {sorted(closure - locked)}"
+    )
+    assert not (locked - closure), (
+        "these modules are locked but no longer reachable from the permanence "
+        f"entry points; drop them or the lock over-claims: {sorted(locked - closure)}"
+    )
+
+
+def test_frozen_source_lock_protocol_matches_the_live_stack() -> None:
+    root = Path(__file__).resolve().parents[1]
+    protocol = verify_locked_sources(root=root)
+
+    assert protocol["protocol_version"] == "V2"
+    # A superseding version must say what it replaced and why, or the lock's
+    # history stops being auditable.
+    amendment = protocol["amendment_record"]
+    assert amendment["prior_protocol_path"].endswith("_V1.json")
+    assert len(amendment["prior_protocol_sha256"]) == 64
+    assert amendment["reason"]
+    assert protocol["file_count"] == len(permanence_stack_source_paths(root))
+    assert set(protocol["locked_source_sha256"]) == {
+        path.relative_to(root).as_posix()
+        for path in permanence_stack_source_paths(root)
+    }
+
+
+def test_locked_source_drift_blocks_the_runner(tmp_path: Path) -> None:
+    """Drift must stop the run, not merely be reportable afterwards."""
+
+    root = Path(__file__).resolve().parents[1]
+    workspace = tmp_path / "workspace"
+    # Derived from the constant so a protocol amendment cannot leave this
+    # copying a superseded file and silently testing nothing.
+    protocol = PERMANENCE_STACK_SOURCE_LOCK.as_posix()
+    for relative in (
+        *(path.relative_to(root).as_posix() for path in permanence_stack_source_paths(root)),
+        protocol,
+        protocol.replace(".json", ".sha256"),
+    ):
+        destination = workspace / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((root / relative).read_bytes())
+
+    assert verify_locked_sources(root=workspace)["file_count"] == 22
+
+    target = workspace / "cal/model/stochastic_motion_filter.py"
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="refusing to produce evidence"):
+        verify_locked_sources(root=workspace)

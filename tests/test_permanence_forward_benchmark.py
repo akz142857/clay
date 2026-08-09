@@ -8,7 +8,9 @@ and the determinism of the harness, plus a smoke check of the GRU baseline.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -463,3 +465,156 @@ def test_gru_capacity_sweep_structure():
         assert run["parameter_count"] > 0
         assert 0.0 <= run["top1_accuracy"] <= 1.0
         assert 0.0 <= run["mrr"] <= 1.0
+
+
+# The pairwise positive/negative construction is 99.973% separable by a pure
+# parity rule -- 99.95% of negatives sit at Manhattan distance 1 from the
+# positive, so their coordinate parities differ deterministically (2026-08-08
+# review, finding F18).  It was confirmed at the time that no frozen gate reads
+# it: every gated metric ranks over the whole hidden field (`candidate_cells`).
+# The review attached a permanent prohibition on it ever returning.  A
+# prohibition nobody checks is a comment, so this checks it.
+_GATED_SCORING_MODULES = (
+    "cal/evaluation/stochastic_permanence_benchmark.py",
+    "cal/evaluation/stochastic_permanence_artifacts.py",
+    "cal/evaluation/stochastic_permanence_phase0.py",
+    "cal/evaluation/stochastic_permanence_capacity_artifacts.py",
+    "cal/evaluation/stochastic_permanence_kernel_diagnostic.py",
+    "cal/evaluation/_permanence_belief_free_baseline.py",
+)
+
+# Everything in `permanence_forward_benchmark` that produces a number a gate
+# later reads.  The module also hosts non-gated baselines (GRU, slot), which
+# may legitimately use the pairwise field.
+_GATED_SCORING_FUNCTIONS = (
+    "_rank",
+    "_score_maps",
+    "_sample_metric_record",
+    "_mean_metric_records",
+    "_episode_binned_score",
+    "_belief_map",
+    "_geometric_map",
+    "_fit_prior_maps",
+    "_uniform_field_maps",
+    "_wasted_field_mass",
+    "_paired_seed_bootstrap",
+)
+
+
+def _reads_pairwise_negative(node: ast.AST) -> bool:
+    return any(
+        isinstance(child, ast.Attribute)
+        and child.attr == "negative"
+        and isinstance(child.ctx, ast.Load)
+        for child in ast.walk(node)
+    )
+
+
+def test_pairwise_negative_construction_stays_out_of_every_gate() -> None:
+    root = Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+
+    for relative in _GATED_SCORING_MODULES:
+        tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+        if _reads_pairwise_negative(tree):
+            offenders.append(relative)
+
+    benchmark = root / "cal/evaluation/permanence_forward_benchmark.py"
+    tree = ast.parse(benchmark.read_text(encoding="utf-8"))
+    scoring = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name in _GATED_SCORING_FUNCTIONS
+    }
+    missing = sorted(set(_GATED_SCORING_FUNCTIONS) - set(scoring))
+    assert not missing, (
+        "the gated scoring path was renamed; this prohibition now guards "
+        f"nothing: {missing}"
+    )
+    offenders.extend(
+        f"permanence_forward_benchmark.py::{name}"
+        for name, node in sorted(scoring.items())
+        if _reads_pairwise_negative(node)
+    )
+
+    assert not offenders, (
+        "the pairwise positive/negative construction is parity-separable "
+        "(balanced accuracy 0.99973) and is permanently barred from every "
+        f"gate; it is read by: {offenders}"
+    )
+
+
+def test_core_entry_points_refuse_overlapping_train_and_eval_seeds() -> None:
+    """The contamination guard used to live only in the gated callers.
+
+    `--train-seeds 101` against the default bases is enough to overlap, and the
+    review measured a position prior jumping from 0.044 to 0.243 top-1 once it
+    did (finding F10).  Reports produced straight from these functions carried
+    no protection at all.
+    """
+
+    overlapping = ([61000, 61001], [61001, 61002])
+    for call in (
+        lambda: run_benchmark(
+            *overlapping, steps=40, warmup=12, turn_probability=0.45
+        ),
+        lambda: gru_capacity_sweep(
+            *overlapping,
+            steps=40,
+            warmup=12,
+            turn_probability=0.45,
+            hidden_sizes=(16,),
+            epochs_grid=(1,),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="seed collision between streams"):
+            call()
+
+
+def test_action_and_layout_streams_cannot_collide_across_a_seed_population() -> None:
+    """Layout is keyed on the seed and actions on seed + 50,000.
+
+    Two episodes exactly that far apart share a stream -- one's actions replay
+    the other's layout draw.  The spacing was assumed, never asserted (finding
+    F23).
+    """
+
+    with pytest.raises(ValueError, match="layout stream as another's action"):
+        run_benchmark(
+            [61000],
+            [61000 + 50_000],
+            steps=40,
+            warmup=12,
+            turn_probability=0.45,
+        )
+
+
+def test_cli_refuses_to_override_parameters_the_registry_binds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry-bound report is stamped with that registry's digest.
+
+    `--turn-probability` used to take effect *after* the registry was read
+    while the report kept wearing the digest, which made the provenance a
+    false claim (review finding F11).
+    """
+
+    from cal.evaluation.permanence_forward_benchmark import main
+
+    registry = (
+        Path(__file__).resolve().parents[1]
+        / "experiments/V2_P1_PERMANENCE_DEVELOPMENT_SEED_REGISTRY_V4.json"
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "permanence_forward_benchmark",
+            "--seed-registry",
+            str(registry),
+            "--turn-probability",
+            "0.35",
+        ],
+    )
+    with pytest.raises(ValueError, match="bound by the seed registry"):
+        main()

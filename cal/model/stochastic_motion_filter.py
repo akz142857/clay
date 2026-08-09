@@ -31,9 +31,19 @@ class EmptyPosteriorError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class GridSpec:
-    grid_size: int = 25
-    arena_low: int = 7
-    arena_high: int = 17
+    """Arena geometry the filter is entitled to assume.
+
+    These three numbers carry no defaults on purpose.  They used to default to
+    the evaluation world's 25/7/17 with nothing checking that the copy stayed
+    true, and the failure is silent rather than loud: every cell outside the
+    declared arena is treated as a certain wall, so a filter built against a
+    stale arena quietly reinterprets live cells as static (review finding F17).
+    Callers state the geometry they actually simulate in.
+    """
+
+    grid_size: int
+    arena_low: int
+    arena_high: int
 
     def __post_init__(self) -> None:
         if self.grid_size < 1:
@@ -119,6 +129,37 @@ def _probability_grid(
     if np.any((result < 0.0) | (result > 1.0)):
         raise ValueError(f"{name} must be in [0, 1]")
     return result
+
+
+def _require_exact_turn_mixture(
+    static_probability: np.ndarray,
+    *,
+    turn_probability: float,
+    allow_turn: bool,
+) -> None:
+    """Refuse the turn mixture where it is not the exact posterior.
+
+    The turn branch weights each alternative direction by that direction's
+    *marginal* availability and renormalizes per direction.  When every arena
+    cell is certainly static or certainly free those marginals are the joint,
+    and the result is exact.  Under fractional static probability they are not:
+    a numeric probe measured an L1 deviation of 0.0231 against the exact
+    topology mixture (review finding F16).
+
+    Every caller today feeds a binary grid, so nothing is wrong today.  The
+    module reserves a learned ``static_probability`` slot, though, and the
+    failure on the day it is filled would be a silently approximate posterior
+    presented as exact inference.  This makes that day raise instead.
+    """
+
+    if not allow_turn or turn_probability <= 0.0:
+        return
+    if np.any((static_probability > 0.0) & (static_probability < 1.0)):
+        raise ValueError(
+            "the turn mixture is exact only for a binary static_probability "
+            "grid; fractional occupancy needs a joint-topology successor "
+            "kernel, not this per-direction marginal one"
+        )
 
 
 def _probabilistic_bounce_distribution_validated(
@@ -256,6 +297,9 @@ def autonomous_successors(
     validated = _probability_grid(
         static_probability, name="static_probability", spec=spec
     )
+    _require_exact_turn_mixture(
+        validated, turn_probability=turn_probability, allow_turn=allow_turn
+    )
     return _autonomous_successors_validated(
         position,
         velocity,
@@ -271,7 +315,16 @@ def bayesian_no_detection_update(
     no_detection_probability: np.ndarray,
     existence: float,
 ) -> tuple[np.ndarray, float, float, float]:
-    """Update ``q(state|exists)`` and Bernoulli existence exactly once."""
+    """Update ``q(state|exists)`` and Bernoulli existence exactly once.
+
+    Reserved, not live: nothing in the pipeline calls this yet (review finding
+    F21).  The existence channel it implements belongs to the candidate design
+    in ``docs/experiments/V2_I1_STOCHASTIC_PERMANENCE_PLAN.md`` §5.3, and
+    ``PackedKinematicFilter`` currently conditions on non-detection without
+    carrying a Bernoulli existence term.  Its tests cover the arithmetic, not
+    its integration -- treat "the tests pass" as saying nothing about whether
+    the pipeline uses it.
+    """
 
     q = np.asarray(conditional_probability, dtype=np.float64)
     likelihood = np.asarray(no_detection_probability, dtype=np.float64)
@@ -305,7 +358,7 @@ class PackedKinematicFilter:
         self,
         k_max: int,
         *,
-        spec: GridSpec = GridSpec(),
+        spec: GridSpec,
         probability_dtype: np.dtype[np.floating[Any]] = np.dtype(np.float32),
     ) -> None:
         if k_max < 1:
@@ -369,6 +422,11 @@ class PackedKinematicFilter:
             no_detection_probability,
             name="no_detection_probability",
             spec=self.spec,
+        )
+        _require_exact_turn_mixture(
+            validated_static,
+            turn_probability=turn_probability,
+            allow_turn=allow_turn,
         )
         self._next_codes.fill(0)
         self._next_probability.fill(0.0)
@@ -446,9 +504,17 @@ class PackedKinematicFilter:
         return {
             "pre_pruning_support": next_count,
             "retained_support": retain_count,
+            # The retained slots may include states the observation drove to
+            # zero, which the unpruned reference drops outright.  Reporting
+            # only `retained_support` made the two supports look comparable
+            # when they count different things (review finding F21).
+            "retained_positive_support": int(
+                np.count_nonzero(self.probability[:retain_count])
+            ),
             "observation_evidence": observation_evidence,
             "retained_probability": retained_probability,
             "step_pruned_mass": step_pruned_mass,
+            "maximum_step_pruned_mass": self.maximum_step_pruned_mass,
             "cumulative_pruned_mass": self.cumulative_pruned_mass,
         }
 
@@ -541,9 +607,9 @@ class PackedPosteriorPool:
         hypotheses: int = 5,
         entities: int = 11,
         k_max: int = 40,
-        grid_size: int = 25,
-        arena_low: int = 7,
-        arena_high: int = 17,
+        grid_size: int,
+        arena_low: int,
+        arena_high: int,
     ) -> None:
         if min(hypotheses, entities, k_max, grid_size) < 1:
             raise ValueError("capacity dimensions must be positive")
@@ -660,6 +726,12 @@ class PackedPosteriorPool:
             raise RuntimeError("packed posterior pool overflow")
         for code in candidate_codes:
             self.spec.decode(int(code))
+        # A repeated state code splits one state's mass across two slots, so
+        # the factor's own marginal disagrees with itself and the slot budget
+        # is spent twice on the same state.  Nothing checked for it before
+        # (review finding F21).
+        if np.unique(candidate_codes).size != count:
+            raise ValueError("factor posterior repeats a state code")
         if not np.all(np.isfinite(candidate_probability)):
             raise ValueError("factor probability must be finite")
         if np.any(candidate_probability < 0.0):
@@ -721,8 +793,19 @@ class PackedPosteriorPool:
             "grid_size": self.grid_size,
             "S_max": self.s_max,
             "S_max_minimum": self.hypotheses * self.entities * self.k_max,
-            "fully_detached_safe": self.s_max
-            >= self.hypotheses * self.entities * self.k_max,
+            # Compare what is actually allocated against the requirement, not
+            # `s_max` against its own definition -- the latter reduced to
+            # `H*E*K >= H*E*K` and could not fail (review finding F19).  The
+            # property being claimed is that every (hypothesis, entity)
+            # factor owns k_max slots outright, which is a statement about
+            # the arrays.
+            "fully_detached_safe": (
+                int(self.codes.size)
+                >= self.hypotheses * self.entities * self.k_max
+                and int(self.probability.size)
+                >= self.hypotheses * self.entities * self.k_max
+                and int(self.counts.size) >= self.hypotheses * self.entities
+            ),
             "copy_on_write": False,
             "arena_low": self.spec.arena_low,
             "arena_high": self.spec.arena_high,

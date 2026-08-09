@@ -45,6 +45,9 @@ from cal.evaluation.randomized_occlusion_world import (
     _bounce_advance,
     RandomizedOcclusionWorld,
 )
+from cal.evaluation.stochastic_permanence_custody import (
+    validate_disjoint_seed_sets,
+)
 from cal.evaluation.v2_i1_integration import (
     ARENA_HIGH,
     ARENA_LOW,
@@ -335,6 +338,12 @@ def run_diagnostic(
     warmup: int,
     world: str = "fixed",
 ) -> dict[str, object]:
+    # Both probes here are fitted on the train seeds and scored on the
+    # evaluation seeds, so an overlap silently reports memorization as
+    # generalization (review finding F10).
+    validate_disjoint_seed_sets(
+        {"train": list(train_seeds), "evaluation": list(evaluation_seeds)}
+    )
     world_factory = WORLD_FACTORIES[world]
     train_samples: list[_Sample] = []
     eval_samples: list[_Sample] = []

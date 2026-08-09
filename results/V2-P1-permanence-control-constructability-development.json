@@ -1,0 +1,104 @@
+{
+  "all_controls_constructed": true,
+  "controls": {
+    "assume_all_visible": {
+      "constructed": true,
+      "eligible_sample_count": 12473,
+      "empty_map_count": 0,
+      "note": "every hidden positive is by definition in a non-visible cell, so this control places its mass entirely outside the answer -- which is what refusing to represent occlusion costs",
+      "score": {
+        "argmax_position_error": 20.0,
+        "balanced_binary_nll": 6.907755278982136,
+        "brier": 0.04053974074763596,
+        "categorical_nll": 13.815510557964272,
+        "empty_map_rate": 1.0,
+        "mean_any_positive_top1_chance": 0.04053974074763596,
+        "mean_candidate_count": 31.319890964483285,
+        "mrr": 0.03527995606302161,
+        "sample_count": 12473,
+        "top1_accuracy": 0.0
+      }
+    },
+    "identity_scrambled": {
+      "constructed": true,
+      "eligibility_rule": "at least two simultaneously hidden tracked objects",
+      "eligible_sample_count": 2081,
+      "ineligible_sample_count": 10392,
+      "note": "single-hidden-object events fall through to the unscrambled construction; only the eligible count is evidence about this control",
+      "score": {
+        "argmax_position_error": 9.814960314278842,
+        "balanced_binary_nll": 5.783454403286512,
+        "brier": 0.04596145076695816,
+        "categorical_nll": 11.278715809663513,
+        "empty_map_rate": 0.4231540126673615,
+        "mean_any_positive_top1_chance": 0.04053974074763596,
+        "mean_candidate_count": 31.319890964483285,
+        "mrr": 0.20948025464532755,
+        "sample_count": 12473,
+        "top1_accuracy": 0.18022929527780004
+      }
+    },
+    "random_labels": {
+      "constructed": true,
+      "eligible_sample_count": 12473,
+      "score": {
+        "argmax_position_error": 4.769021085544777,
+        "balanced_binary_nll": 3.9523206565051074,
+        "brier": 0.03997913804889967,
+        "categorical_nll": 6.626747554278023,
+        "empty_map_rate": 0.0,
+        "mean_any_positive_top1_chance": 0.04053974074763596,
+        "mean_candidate_count": 31.319890964483285,
+        "mrr": 0.15209255901725624,
+        "sample_count": 12473,
+        "top1_accuracy": 0.046099575082177505
+      }
+    },
+    "raw_sensor": {
+      "constructed": true,
+      "eligible_sample_count": 12473,
+      "score": {
+        "argmax_position_error": 4.525294636414656,
+        "balanced_binary_nll": 3.105319215422019,
+        "brier": 0.03967461093654355,
+        "categorical_nll": 5.252872340143319,
+        "empty_map_rate": 0.0,
+        "mean_any_positive_top1_chance": 0.04053974074763596,
+        "mean_candidate_count": 31.319890964483285,
+        "mrr": 0.16448220064318403,
+        "sample_count": 12473,
+        "top1_accuracy": 0.052032389962318605
+      }
+    },
+    "time_shuffled": {
+      "constructed": true,
+      "eligible_sample_count": 12473,
+      "score": {
+        "argmax_position_error": 12.264411128036558,
+        "balanced_binary_nll": 6.157510976388436,
+        "brier": 0.04461707811960587,
+        "categorical_nll": 11.829010105895808,
+        "empty_map_rate": 0.5580052914294877,
+        "mean_any_positive_top1_chance": 0.04053974074763596,
+        "mean_candidate_count": 31.319890964483285,
+        "mrr": 0.1675400910334387,
+        "sample_count": 12473,
+        "top1_accuracy": 0.13621422272107753
+      }
+    }
+  },
+  "gated": false,
+  "population": {
+    "evaluation_sample_count": 12473,
+    "evaluation_seed_count": 150,
+    "multi_hidden_evaluation_sample_count": 2081,
+    "train_sample_count": 3506,
+    "train_seed_count": 40
+  },
+  "purpose": "F6/O2: demonstrate by execution that every V8 control can be constructed from randomized-world development events",
+  "registry": {
+    "path": "experiments/V2_P1_PERMANENCE_DEVELOPMENT_SEED_REGISTRY_V4.json",
+    "selection_digest_sha256": "8bbed3df12c08a2eb269379799c5e811c8a05b30b1e7d1fa72ccea7f43c0da89"
+  },
+  "status": "development_only_non_gated"
+}

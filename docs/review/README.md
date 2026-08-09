@@ -10,12 +10,13 @@
 
 | 文档 | 类型 | 说明 |
 | --- | --- | --- |
-| [`OPEN_ITEMS.md`](OPEN_ITEMS.md) | 待办 | 已识别但未处理的项：4 条阻断冻结、7 条影响正确性、4 条架构级缺口、4 条待人类定夺 |
+| [`OPEN_ITEMS.md`](OPEN_ITEMS.md) | 待办 | 已识别但未处理的项。2026-08-09 修正轮后剩：**1 条阻断冻结**（无候选实现）、3 条架构级缺口、4 条待人类定夺 |
 | [`REVIEW_PLAN.md`](REVIEW_PLAN.md) | 方案 v1.3 | 评审对象、角色、流程、检查清单、严重性分级与放行规则；两条轨道（里程碑深度评审 / 常态 PR 评审） |
 | [`REVIEW_REVIEW_PLAN_2026_08_08.md`](REVIEW_REVIEW_PLAN_2026_08_08.md) | 报告 | 对评审方案自身的评审（`pass_with_conditions`），v1.1 的修订依据 |
 | [`REVIEW_REVIEW_PLAN_SUPPLEMENT_2026_08_08.md`](REVIEW_REVIEW_PLAN_SUPPLEMENT_2026_08_08.md) | 补充 | 复核上述报告八项发现的落地情况：一项漏改（F5 的 §10）、一处章节号笔误；v1.2 的修订依据 |
 | [`REVIEW_PERMANENCE_FREEZE_2026_08_08.md`](REVIEW_PERMANENCE_FREEZE_2026_08_08.md) | 报告 | 随机化永久性专案冻结前评审，判定 **`block`** |
 | [`REVIEW_PERMANENCE_FREEZE_FOLLOWUP_2026_08_08.md`](REVIEW_PERMANENCE_FREEZE_FOLLOWUP_2026_08_08.md) | 补充 | F4/F8 已修复、F5 推迟并入 V11 的顺序决定；总判定仍为 `block` |
+| [`REVIEW_PERMANENCE_FREEZE_COMPLETION_2026_08_09.md`](REVIEW_PERMANENCE_FREEZE_COMPLETION_2026_08_09.md) | 补充 | 待办清单修正轮：3/4 阻断项、全部 P2/P3、G4 在永久性侧消除；总判定仍为 `block`，剩 O3 无候选实现 |
 
 ## 命名约定
 
@@ -33,3 +34,15 @@
 0.875 塌到 0.545，位置先验贴随机线），两份代码扫描**均未发现 P0/P1 代码缺陷**。
 
 阻断项 3 条 P0、5 条 P1；冻结前必须完成的六项修复见报告结论。
+
+### 2026-08-09｜待办清单修正轮 —— 判定仍为 `block`
+
+永久性栈拿到了第一份 `locked_source_sha256`（22 个模块，取自 import 闭包而非
+手工清单），并由 Phase-0 / Phase-R 入口在做任何工作前强制——从"能发现改动"变成
+"拒绝用改过的代码产出证据"。五个 V8 对照在完整 development split 上实跑构造
+成功，其中 `identity_scrambled` 只在 **16.7%**（2081/12473）的事件上可构造，
+这正是 V5 留出中途停止的那个量。四个恒真门换成可失败形式，其中两个因此给出了
+此前不存在的测量（真实分支因子 4、branch 记账残差 2.44e-15）。
+
+**这一轮不让程序更接近通过**：唯一剩下的技术阻断项是 O3——仍无候选实现，
+12 项确认门从未在真实候选上运行过。

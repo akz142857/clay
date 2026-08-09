@@ -149,12 +149,20 @@ def validate_seed_registry_for_scan(registry: dict[str, Any]) -> None:
 
 def run_scan(train_seeds: list[int], evaluation_seeds: list[int]) -> dict[str, Any]:
     rows = []
+    # Read the episode length from the coverage contract rather than repeating
+    # 200/12 here.  The two agree today, so the literals were harmless -- but
+    # the contract is what the registry is validated against, and a contract
+    # change would have left the scan silently sampling a different world
+    # (review finding F22).
+    contract = coverage_contract()
+    steps = int(contract["steps"])
+    warmup = int(contract["warmup"])
     for probability in CANDIDATE_TURN_PROBABILITIES:
         report = run_benchmark(
             train_seeds,
             evaluation_seeds,
-            steps=200,
-            warmup=12,
+            steps=steps,
+            warmup=warmup,
             turn_probability=probability,
             include_gru=False,
             include_slot=False,

@@ -98,6 +98,25 @@ protocol that pins hashes of `cal/evaluation/v2_m1.py`, `v2_m2.py`,
 you edit any of the six files above, `v2_m1_m3_confirmation.py` runs will
 raise on the next execution**, by design.
 
+The randomized-permanence stack has its own, separate lock as of 2026-08-09:
+`experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V2.json` (+ `.sha256`; V1 is the
+superseded amendment-chain link) pins the
+**22-module transitive import closure** of the Phase-0/Phase-R/scan/registry
+entry points, and `run_phase0` / `run_phase_r_diagnostic` call
+`verify_locked_sources` before doing any work. **Editing any of those 22 files
+makes both runners — and the tests that call them — raise until you mint a new
+protocol version** with `mint_permanence_stack_source_lock`, keeping the old one
+as an amendment-chain link. Every version after V1 must carry an
+`amendment_record` naming its predecessor and the reason, which the builder
+enforces. Amending the lock also means regenerating the development artifacts,
+since their own `source_lock` records the sources that produced them — V1 → V2
+did exactly that rather than acknowledging the drift. The membership list is not
+hand-kept:
+`tests/test_stochastic_permanence_artifacts.py` recomputes the closure and fails
+if a new import escapes the lock. `cal/env/` is deliberately out of scope (it is
+the M1/V1 world and this stack does not import it); the ground-truth simulators
+here are `randomized_occlusion_world.py` and `v2_i1_integration.py`, both locked.
+
 This enforcement is *not* uniform across the pipeline, and treating it as if
 it were will give a false sense of safety:
 - `v2_m2.py` and `v2_m3_hypotheses.py` each hash-check only their own

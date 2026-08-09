@@ -49,10 +49,57 @@ SUMMARY_NAMES = {
 }
 
 
+class IndexWouldTruncateError(RuntimeError):
+    """Raised when rebuilding would drop results the index already records."""
+
+
+def _recorded_paths(destination: Path) -> list[str]:
+    if not destination.exists():
+        return []
+    payload = _read_json(destination)
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return []
+    return [
+        entry["path"]
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    ]
+
+
+def _guard_against_truncation(
+    destination: Path, entries: list[dict[str, Any]], *, prune: bool
+) -> list[str]:
+    """Refuse to replace a committed index with a smaller one.
+
+    ``results/`` is not version controlled but ``INDEX.json`` is, so the
+    committed index references many summaries that a fresh checkout does not
+    have.  Rebuilding in that checkout used to silently overwrite the history
+    -- 702 entries down to 22 (review finding F13).  Losing those references
+    is only correct when it is asked for.
+    """
+
+    indexed = {entry["path"] for entry in entries}
+    dropped = [
+        path
+        for path in _recorded_paths(destination)
+        if path not in indexed and not Path(path).exists()
+    ]
+    if dropped and not prune:
+        raise IndexWouldTruncateError(
+            f"{destination} records {len(dropped)} result(s) that are absent "
+            f"from this checkout; rebuilding here would delete those "
+            f"references. Re-run with --prune to drop them on purpose. "
+            f"First dropped: {sorted(dropped)[:3]}"
+        )
+    return dropped
+
+
 def build_result_index(
     results_directory: str | Path = "results",
     *,
     output_path: str | Path | None = None,
+    prune: bool = False,
 ) -> dict[str, Any]:
     root = Path(results_directory)
     entries = []
@@ -90,6 +137,10 @@ def build_result_index(
                     ),
                 }
             )
+    destination = (
+        Path(output_path) if output_path is not None else root / "INDEX.json"
+    )
+    dropped = _guard_against_truncation(destination, entries, prune=prune)
     index = {
         "schema_version": 1,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -97,9 +148,8 @@ def build_result_index(
         "entry_count": len(entries),
         "entries": entries,
     }
-    destination = (
-        Path(output_path) if output_path is not None else root / "INDEX.json"
-    )
+    if dropped:
+        index["pruned_absent_paths"] = sorted(dropped)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
         json.dumps(index, indent=2, sort_keys=True) + "\n",
@@ -126,12 +176,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=Path("results"),
     )
     parser.add_argument("--output", type=Path)
-    arguments = parser.parse_args(argv)
-    index = build_result_index(
-        arguments.results,
-        output_path=arguments.output,
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help=(
+            "drop index entries whose result files are absent from this "
+            "checkout; without it a rebuild that would shrink the index fails"
+        ),
     )
+    arguments = parser.parse_args(argv)
+    try:
+        index = build_result_index(
+            arguments.results,
+            output_path=arguments.output,
+            prune=arguments.prune,
+        )
+    except IndexWouldTruncateError as error:
+        print(f"refusing to rebuild index: {error}")
+        return 1
     print(f"indexed {index['entry_count']} result summaries")
+    if index.get("pruned_absent_paths"):
+        print(f"pruned {len(index['pruned_absent_paths'])} absent result(s)")
     return 0
 
 
