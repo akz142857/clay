@@ -15,8 +15,19 @@ implications — see "Frozen protocols" below before touching anything under
 
 Full context lives in `docs/RESEARCH_PLAN.md` (V1, M1–M1v) and
 `docs/RESEARCH_PLAN_V2.md` (V2, current program) — both written in Chinese.
-`README.md` is the up-to-date narrative of what has been run and what passed
-or failed; read it before assuming what stage the project is in.
+Before assuming what stage the project is in, read, in this order:
+
+- `RESEARCH_STATUS.md` — per-stage pass/fail table and the explicit list of
+  claims this repository does *not* make. This is the authoritative status
+  document; `README.md` is the narrative version of the same thing.
+- `docs/review/OPEN_ITEMS.md` (Chinese) — the live tracker for the current
+  work front: open review findings, freeze blockers, current source-lock
+  version, current development-artifact versions, and the expected
+  `uv run pytest` count. It is updated per PR and is the fastest way to see
+  what state the tree should be in.
+- `docs/experiments/V2_P1_CANDIDATE_IMPLEMENTATION_PLAN.md` for the increment
+  decomposition of the in-progress permanence candidate, and the rest of
+  `docs/experiments/*.md` for the permanent record of each finished stage.
 
 ## Setup and commands
 
@@ -30,6 +41,13 @@ uv run pytest tests/test_world.py::test_name -q  # single test
 There is no separate lint command configured; pytest is the only checked
 command (`[tool.pytest.ini_options]` in `pyproject.toml`, `testpaths = ["tests"]`).
 
+CI (`.github/workflows/tests.yml`) does **not** run `pytest` over `tests/`; it
+splits the suite into named groups by filename glob (`tests/test_[a-i]*.py`,
+`tests/test_[m-u]*.py`) plus explicit per-file lists for the `test_v2_*` and
+`test_world.py` groups. A new test file whose name falls outside those globs
+and is not added to a list will pass locally and never run in CI — add it to
+the matrix when you add the file.
+
 All experiment/eval entry points are `console_scripts` declared in
 `pyproject.toml` and invoked via `uv run <name>`, e.g.:
 
@@ -40,6 +58,16 @@ uv run cal-multiseed --output results/M1-multiseed
 uv run cal-index --results results        # rebuilds results/INDEX.json
 uv run streamlit run streamlit_app.py     # read-only dashboard over results/ JSON
 ```
+
+After pulling, and before building on the tree, confirm it is not drifted:
+
+```bash
+uv run pytest        # expected pass count is recorded in docs/review/OPEN_ITEMS.md
+uv run python -c "from cal.evaluation.stochastic_permanence_artifacts import verify_locked_sources as v; print(v(root='.')['protocol_version'], v(root='.')['file_count'])"
+```
+
+A mismatch means someone edited a locked module without minting a new
+protocol — find out why before adding to it.
 
 See `README.md` for the full, current command sequence for both the V1 (M1)
 and V2 (identifiability → M1 → M2 → M3 → M4) pipelines — it is kept in sync
@@ -99,8 +127,12 @@ you edit any of the six files above, `v2_m1_m3_confirmation.py` runs will
 raise on the next execution**, by design.
 
 The randomized-permanence stack has its own, separate lock as of 2026-08-09:
-`experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V2.json` (+ `.sha256`; V1 is the
-superseded amendment-chain link) pins the
+currently `experiments/V2_P1_PERMANENCE_STACK_SOURCE_LOCK_V3.json` (+ `.sha256`;
+V1 and V2 are superseded amendment-chain links). The active version is not
+guessed from the directory listing — it is the `PERMANENCE_STACK_SOURCE_LOCK`
+constant in `cal/evaluation/stochastic_permanence_artifacts.py`, and
+`tests/test_stochastic_permanence_artifacts.py` asserts the file name's version
+suffix matches. The lock pins the
 **22-module transitive import closure** of the Phase-0/Phase-R/scan/registry
 entry points, and `run_phase0` / `run_phase_r_diagnostic` call
 `verify_locked_sources` before doing any work. **Editing any of those 22 files
@@ -110,7 +142,10 @@ as an amendment-chain link. Every version after V1 must carry an
 `amendment_record` naming its predecessor and the reason, which the builder
 enforces. Amending the lock also means regenerating the development artifacts,
 since their own `source_lock` records the sources that produced them — V1 → V2
-did exactly that rather than acknowledging the drift. The membership list is not
+and V2 → V3 each did exactly that rather than acknowledging the drift. That
+regeneration is not cheap: Phase-0 measured ~3h41m single-core with the locked
+`--simulation-trials 1024`, so an "obvious one-line fix" inside the 22 modules
+costs a protocol amendment plus hours of recompute. The membership list is not
 hand-kept:
 `tests/test_stochastic_permanence_artifacts.py` recomputes the closure and fails
 if a new import escapes the lock. `cal/env/` is deliberately out of scope (it is
@@ -147,6 +182,43 @@ patterns), not an in-place edit. If you touch `v2_m2.py`, `v2_m3_hypotheses.py`,
 `v2_m1.py`, `v2_m3.py`, or the env simulators, be aware no automated check
 will flag it except a subsequent confirmation-stage run (and even that only
 covers a subset of these files) — don't assume silence means safe.
+
+### Where current work happens (deliberately outside the lock)
+
+The active work front is the I1-P1 stochastic-permanence candidate, and it was
+built specifically so that it is *not* in the 22-module closure — the candidate
+is injected into `stochastic_permanence_benchmark.py` through the
+`CandidateFactory` protocol, so no locked entry point imports it. Editing these
+files needs no amendment and no artifact regeneration:
+
+- `cal/model/permanence_candidate.py` (the assembled O3 candidate),
+  `permanence_track.py`, `sensor_only_static_map.py`,
+  `branch_self_identity.py`, `association_bank.py`;
+- `cal/evaluation/permanence_candidate_development.py` (the I5 comparison
+  harness, `python -m cal.evaluation.permanence_candidate_development`),
+  `permanence_geometry_diagnostic.py`,
+  `permanence_control_constructability.py`.
+
+If a change you want appears to require editing a locked module, prefer the
+route these modules already take — reconstruct what you need on the unlocked
+side (`permanence_candidate_development.py` replays the world rather than
+adding a field to the locked `_Sample`) and verify the reconstruction against
+the locked path instead of quietly amending the lock.
+
+Everything in this stack is **development-stage**: its numbers come from
+development seeds that have been looked at repeatedly, no confirmatory split
+exists, and modules here carry an explicit `NON-GATED` / "not evidence"
+docstring line. Keep writing that line; do not label development output as
+evidence.
+
+### One-shot evidence and consumed holdouts
+
+Holdouts here are one-shot. A consumed holdout (e.g. the L0 V8 run of
+2026-07-28, bound to a git tag and a recorded result SHA-256) is historical
+evidence, never a reusable test set, and never development data. Do not tune
+against it, re-run it to get a better number, or edit its result JSON. A new
+claim requires a newly preregistered split whose contents were not visible
+during development — see `CONTRIBUTING.md` and `RESEARCH_STATUS.md`.
 
 Result JSON produced by these stages is validated with
 `cal.evaluation.v2_artifacts.require_authorization`, which enforces
