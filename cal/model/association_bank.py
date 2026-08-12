@@ -23,6 +23,13 @@ renders whatever occupies it, so ``P_D(s)`` is the visibility of ``s`` and
 tunes an emission covariance, because there is no measurement noise to tune
 against.
 
+A matched track is updated by *conditioning* its predicted posterior on the
+detected cell, never by restarting it from that cell with a velocity guessed
+from the one-step displacement.  The two agree only when the entity was
+already tracked and moved a clean unit step; everywhere else the restart
+discards heading -- and it discards it at the last visible step, which is the
+step every hidden trajectory is propagated from.
+
 Every branch enumerates only **one-to-one** assignments, so a detection cannot
 explain two tracks inside one hypothesis.  Enumeration is over the gated
 bipartite graph and the child count per parent is capped; both bounds are
@@ -47,7 +54,6 @@ from cal.model.stochastic_motion_filter import EmptyPosteriorError, GridSpec
 
 _Cell = tuple[int, int]
 _Velocity = tuple[int, int]
-_UNIT_VELOCITIES = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +65,6 @@ class BankKernel:
     maximum_hypotheses: int
     maximum_children_per_parent: int
     maximum_tracks: int
-    gate_radius: int = 1
 
     def __post_init__(self) -> None:
         if not 0.0 < self.birth_intensity:
@@ -72,8 +77,6 @@ class BankKernel:
             raise ValueError("maximum_children_per_parent must be positive")
         if self.maximum_tracks < 1:
             raise ValueError("maximum_tracks must be positive")
-        if self.gate_radius < 0:
-            raise ValueError("gate_radius must be non-negative")
 
 
 @dataclass
@@ -116,20 +119,6 @@ def as_probability_field(values: np.ndarray) -> np.ndarray:
             f"large to be rounding"
         )
     return np.clip(array, 0.0, 1.0)
-
-
-def _velocity_from(previous: _Cell | None, current: _Cell) -> _Velocity | None:
-    """Observed velocity, or ``None`` when the displacement does not reveal one.
-
-    ``None`` is not a failure case to paper over with a default direction: it
-    is the honest state after a single detection, and the caller answers it
-    with a uniform prior instead of an assertion.
-    """
-
-    if previous is None:
-        return None
-    delta = (current[0] - previous[0], current[1] - previous[1])
-    return delta if delta in _UNIT_VELOCITIES else None
 
 
 class GlobalAssociationBank:
@@ -269,6 +258,7 @@ class GlobalAssociationBank:
             child = self._commit(
                 parent,
                 combination,
+                predicted=predicted,
                 detections=detections,
                 static_probability=static_probability,
                 no_detection_probability=no_detection_probability,
@@ -335,6 +325,7 @@ class GlobalAssociationBank:
         parent: AssociationHypothesis,
         combination: Sequence[int | None],
         *,
+        predicted: Sequence[Mapping[tuple[_Cell, _Velocity], float]],
         detections: Sequence[_Cell],
         static_probability: np.ndarray,
         no_detection_probability: np.ndarray,
@@ -348,17 +339,28 @@ class GlobalAssociationBank:
         for index, choice in enumerate(combination):
             source = parent.tracks[index]
             track = self._clone(source)
-            previous = parent.last_positions[index]
             if choice is not None:
                 cell = detections[choice]
+                # The ratio is read off the same two distributions the
+                # assignment was scored against, so the self evidence and the
+                # association evidence cannot disagree about where the track
+                # was or how confident it was about its heading.
                 ratios.append(
-                    self_likelihood_ratio(previous, cell, static_probability, action)
+                    self_likelihood_ratio(
+                        source.states(),
+                        self._match_mass(predicted[index], cell),
+                        cell,
+                        static_probability,
+                        action,
+                    )
                 )
-                velocity = _velocity_from(previous, cell)
-                if velocity is None:
-                    track.reset_unknown_velocity(cell)
-                else:
-                    track.reset(cell, velocity)
+                try:
+                    track.condition_on_detection(dict(predicted[index]), cell)
+                except EmptyPosteriorError:
+                    # The gate admitted this pairing, so no support here means
+                    # the two computations disagree rather than the detection
+                    # being implausible; refuse the child instead of guessing.
+                    return None
                 child.tracks.append(track)
                 child.last_positions.append(cell)
                 continue

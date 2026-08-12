@@ -219,3 +219,154 @@ def test_a_newborn_track_does_not_invent_a_direction() -> None:
     reached = {position for position, _velocity in states}
     # A uniform velocity prior reaches all four neighbours, not one.
     assert len(reached) == 4
+
+
+# -- what a matched detection does to the posterior ------------------------
+
+
+def _step_with_blind(bank, detections, blind, *, action=0):
+    static = np.zeros((_GRID, _GRID), dtype=np.float64)
+    visible = np.zeros((_GRID, _GRID), dtype=bool)
+    visible[
+        SPEC.arena_low : SPEC.arena_high + 1, SPEC.arena_low : SPEC.arena_high + 1
+    ] = True
+    for x, y in blind:
+        visible[y, x] = False
+    no_detection = np.ones((_GRID, _GRID), dtype=np.float64)
+    no_detection[visible] = 0.0
+    bank.step(
+        detections=tuple(detections),
+        static_probability=static,
+        no_detection_probability=no_detection,
+        visible=visible,
+        turn_probability=0.45,
+        allow_turn=True,
+        action=action,
+        self_likelihood_ratio=lambda *_args: 1.0,
+    )
+
+
+def test_re_acquisition_keeps_the_heading_the_track_maintained() -> None:
+    """Seeing an entity again must not cost what tracking it established.
+
+    A track that was unmatched on the previous step has no one-step
+    displacement to read a velocity from, so restarting it from the detected
+    cell falls back to a four-way prior -- and it does so at the last visible
+    step, which is the step the next hidden stretch is propagated from.  This
+    is the bin the closure gate is defined over, so the loss lands exactly
+    where it is measured.
+    """
+
+    bank = _bank()
+    _step(bank, [(12, 12)], allow_turn=False)
+    _step(bank, [(13, 12)])
+    _step(bank, [(14, 12)])
+    blind = [(15, 12), (16, 12), (17, 12)]
+    _step_with_blind(bank, [], blind)
+    _step_with_blind(bank, [], blind)
+
+    _step(bank, [(17, 12)])
+
+    states = bank.most_likely().tracks[0].states()
+    assert sum(states.values()) == pytest.approx(1.0)
+    assert max(states, key=lambda key: states[key]) == ((17, 12), (1, 0))
+    assert states[((17, 12), (1, 0))] > 0.25
+
+
+def test_the_self_ratio_is_handed_the_tracks_own_posterior() -> None:
+    """The self evidence and the association evidence must see the same track.
+
+    The autonomous denominator is a continuation of wherever the entity was
+    heading, so it is a property of this track's posterior.  Recomputing it
+    from a last-seen cell and an assumed heading -- which is what the previous
+    version did, at a hardcoded ``(1, 0)`` -- makes every track look alike to
+    the self posterior no matter what it has been doing.
+    """
+
+    bank = _bank()
+    _step(bank, [(12, 12)], allow_turn=False)
+
+    track = bank.hypotheses[0].tracks[0]
+    before = track.states()
+    predicted = track.predicted_states(
+        static_probability=np.zeros((_GRID, _GRID), dtype=np.float64),
+        turn_probability=0.45,
+        allow_turn=True,
+    )
+    expected_mass = sum(
+        mass for (position, _v), mass in predicted.items() if position == (13, 12)
+    )
+
+    seen: list[tuple] = []
+
+    def spy(prior_states, autonomous_mass, cell, static_probability, action):
+        seen.append((dict(prior_states), float(autonomous_mass), cell))
+        return 1.0
+
+    static = np.zeros((_GRID, _GRID), dtype=np.float64)
+    visible = np.zeros((_GRID, _GRID), dtype=bool)
+    visible[
+        SPEC.arena_low : SPEC.arena_high + 1, SPEC.arena_low : SPEC.arena_high + 1
+    ] = True
+    no_detection = np.ones((_GRID, _GRID), dtype=np.float64)
+    no_detection[visible] = 0.0
+    bank.step(
+        detections=((13, 12),),
+        static_probability=static,
+        no_detection_probability=no_detection,
+        visible=visible,
+        turn_probability=0.45,
+        allow_turn=True,
+        action=0,
+        self_likelihood_ratio=spy,
+    )
+
+    matched = [call for call in seen if call[2] == (13, 12)]
+    assert matched, "the matched track never reached the self posterior"
+    assert expected_mass > 0.0
+    for prior_states, autonomous_mass, _cell in matched:
+        assert prior_states == pytest.approx(before)
+        assert autonomous_mass == pytest.approx(expected_mass)
+
+
+def test_the_self_ratio_marginalizes_over_the_prior_states() -> None:
+    """A spread-out track contributes every state it might have occupied."""
+
+    from cal.model.permanence_candidate import StochasticPermanenceCandidate
+
+    kernel = {
+        "grid_size": _GRID,
+        "arena_low": SPEC.arena_low,
+        "arena_high": SPEC.arena_high,
+        "camera_x": 12,
+        "camera_y": 12,
+        "turn_probability": 0.45,
+        "k_max": 32,
+        "max_tracks": 8,
+        "max_hypotheses": 5,
+        "max_children_per_parent": 4,
+        "birth_intensity": 0.1,
+        "clutter_intensity": 0.01,
+        "survival_probability": 0.99,
+        "retirement_existence": 0.02,
+        "self_null_prior": 0.5,
+        "static_prior": 0.1,
+        "static_mover_occupancy": 0.1,
+        "static_clamp": 0.01,
+    }
+    candidate = StochasticPermanenceCandidate(kernel, 17_011)
+    static = np.zeros((_GRID, _GRID), dtype=np.float64)
+
+    # Action 2 is the step to the right, so only one of the two possible
+    # previous cells can reach the detection; the ratio must carry that cell's
+    # weight and not the whole track's.
+    concentrated = candidate._self_likelihood_ratio(
+        {((12, 12), (1, 0)): 1.0}, 1.0, (13, 12), static, 2
+    )
+    split = candidate._self_likelihood_ratio(
+        {((12, 12), (1, 0)): 0.25, ((5, 5), (0, 1)): 0.75}, 1.0, (13, 12), static, 2
+    )
+
+    assert concentrated > 0.0
+    assert split == pytest.approx(0.25 * concentrated)
+    assert candidate._self_likelihood_ratio({}, 0.5, (13, 12), static, 2) == 1.0
