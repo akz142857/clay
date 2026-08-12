@@ -183,7 +183,8 @@ class StochasticPermanenceCandidate:
 
     def _self_likelihood_ratio(
         self,
-        previous: tuple[int, int] | None,
+        prior_states: Mapping[tuple[tuple[int, int], tuple[int, int]], float],
+        autonomous_mass: float,
         observed: tuple[int, int],
         static_probability: np.ndarray,
         action: int,
@@ -193,30 +194,24 @@ class StochasticPermanenceCandidate:
         The other entities' autonomous factors are common to every class and
         cancel in the categorical update, which is why the ratio suffices and
         ``null_likelihood`` is 1.
+
+        Both sides are integrals over the track's own posterior.  The
+        denominator is handed in because the bank has already computed it to
+        score the assignment, and recomputing it here would let the two drift
+        apart -- which is how the previous version came to evaluate the
+        autonomous branch at a hardcoded velocity of ``(1, 0)`` and against a
+        thresholded topology, while the numerator used neither.
         """
 
-        if previous is None:
+        if not prior_states:
             return 1.0
-        velocity = (1, 0)
-        action_mass = sum(
-            mass
-            for position, _velocity, mass in action_successors(
-                previous, velocity, static_probability, action=action, spec=self.spec
-            )
-            if position == observed
-        )
-        autonomous_mass = sum(
-            mass
-            for position, _velocity, mass in autonomous_successors(
-                previous,
-                velocity,
-                (static_probability > 0.5).astype(np.float64),
-                turn_probability=self.turn_probability,
-                allow_turn=True,
-                spec=self.spec,
-            )
-            if position == observed
-        )
+        action_mass = 0.0
+        for (position, velocity), mass in prior_states.items():
+            for successor, _velocity, transition in action_successors(
+                position, velocity, static_probability, action=action, spec=self.spec
+            ):
+                if successor == observed:
+                    action_mass += mass * transition
         if autonomous_mass <= 0.0:
             return 1.0 if action_mass <= 0.0 else float(len(ACTION_DELTAS))
         return float(action_mass / autonomous_mass)

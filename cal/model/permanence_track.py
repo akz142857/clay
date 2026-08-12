@@ -142,6 +142,76 @@ class PermanenceTrack:
         self.existence = float(existence)
         self.branch_log_weight = 0.0
 
+    def states(self) -> dict[tuple[tuple[int, int], tuple[int, int]], float]:
+        """``q`` as an explicit distribution, before any propagation.
+
+        Exposed because a global assignment decision needs the pre-propagation
+        states as well as the propagated ones: the action-conditioned successor
+        set of §5.4 starts from where the entity *was*, not from where the
+        autonomous kernel has already moved it.
+        """
+
+        spec = self._filter.spec
+        return {spec.decode(code): mass for code, mass in self._filter.items()}
+
+    def condition_on_detection(
+        self,
+        predicted: dict[tuple[tuple[int, int], tuple[int, int]], float],
+        cell: tuple[int, int],
+        *,
+        existence: float = 1.0,
+    ) -> None:
+        """Apply a matched detection by conditioning ``q_pred`` on the cell.
+
+        This is the update a detection actually licenses.  Restarting the
+        filter from ``(cell, single velocity)`` instead -- which is what a
+        one-step displacement estimate amounts to -- throws away the velocity
+        posterior every time the entity is *seen*, and therefore exactly at the
+        moment before it goes hidden, which is the only moment permanence is
+        scored on.  Worse, a displacement that is not a unit step (the entity
+        was blocked, or clipped at the arena edge) carries no direction at all,
+        so the estimate falls back to a uniform prior and discards heading the
+        track had already established.
+
+        Conditioning keeps whatever the propagated posterior says about
+        velocity given that the entity is at ``cell``, which is both sharper
+        when the heading was known and honest when it was not.
+
+        Existence is 1 because a non-existent entity produces no detection, so
+        the posterior odds are degenerate.  ``Z_match`` itself belongs to the
+        assignment weight (§5.3) and is deliberately not accumulated here.
+        """
+
+        kept = {
+            velocity: mass
+            for (position, velocity), mass in predicted.items()
+            if position == cell
+        }
+        total = sum(kept.values())
+        if not kept or not np.isfinite(total) or total <= 0.0:
+            raise EmptyPosteriorError("detection has no predicted support")
+        if not 0.0 < existence <= 1.0:
+            raise ValueError("existence must be in (0, 1]")
+        if len(kept) > self._filter.k_max:
+            raise ValueError("k_max cannot hold the conditioned posterior")
+
+        spec = self._filter.spec
+        packed = sorted(
+            (spec.encode(cell, velocity), mass / total)
+            for velocity, mass in kept.items()
+        )
+        self._filter.codes.fill(0)
+        self._filter.probability.fill(0.0)
+        for index, (code, mass) in enumerate(packed):
+            self._filter.codes[index] = code
+            self._filter.probability[index] = mass
+        self._filter.count = len(packed)
+        self._filter.branch_log_weight = 0.0
+        self._filter.cumulative_retained_probability = 1.0
+        self._filter.maximum_step_pruned_mass = 0.0
+        self.existence = float(existence)
+        self.branch_log_weight = 0.0
+
     def step_unobserved(
         self,
         *,

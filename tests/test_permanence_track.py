@@ -214,3 +214,54 @@ def test_an_impossible_observation_refuses_rather_than_renormalizing() -> None:
             turn_probability=0.45,
             allow_turn=False,
         )
+
+
+# -- conditioning a matched detection (O3, tracking correction) ------------
+
+
+def test_conditioning_keeps_the_velocity_the_detection_is_consistent_with() -> None:
+    """A detection says where, not where-from; the posterior supplies the rest.
+
+    Restarting the filter from the detected cell with a velocity guessed from
+    the one-step displacement is the alternative, and it discards everything
+    the track had established about heading.
+    """
+
+    track = _track()
+    predicted = track.predicted_states(
+        static_probability=_free_grid(),
+        turn_probability=0.45,
+        allow_turn=True,
+    )
+
+    track.condition_on_detection(predicted, (13, 12))
+
+    states = track.states()
+    assert set(states) <= {((13, 12), velocity) for velocity in
+                           ((1, 0), (-1, 0), (0, 1), (0, -1))}
+    assert sum(states.values()) == pytest.approx(1.0)
+    heading = max(states, key=lambda key: states[key])[1]
+    assert heading == (1, 0)
+    # The whole point: this is not the four-way prior a restart would install.
+    assert states[((13, 12), (1, 0))] > 0.25
+    assert track.existence == pytest.approx(1.0)
+
+
+def test_conditioning_refuses_a_cell_the_posterior_cannot_reach() -> None:
+    """Zero support is a disagreement with the gate, not a detection to absorb."""
+
+    track = _track()
+    predicted = track.predicted_states(
+        static_probability=_free_grid(),
+        turn_probability=0.45,
+        allow_turn=False,
+    )
+
+    with pytest.raises(EmptyPosteriorError):
+        track.condition_on_detection(predicted, (20, 20))
+
+
+def test_states_reports_the_posterior_before_propagation() -> None:
+    track = _track()
+
+    assert track.states() == {((12, 12), (1, 0)): pytest.approx(1.0)}
